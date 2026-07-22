@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Queue",
+  "version": "1.0.0",
+  "description": "Queue ChatGPT prompts and send them safely, one response at a time.",
+  "permissions": ["storage", "sidePanel", "tabs"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "action": { "default_title": "Open ChatGPT Queue" },
+  "background": { "service_worker": "assets/background.js", "type": "module" },
+  "side_panel": { "default_path": "src/sidepanel/index.html" },
+  "content_scripts": [{
+    "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+    "js": ["assets/content.js"],
+    "run_at": "document_idle"
+  }],
+  "commands": {
+    "open-queue-panel": {
+      "suggested_key": { "default": "Alt+Q", "mac": "MacCtrl+Q" },
+      "description": "Open ChatGPT Queue panel"
+    }
+  }
+}
