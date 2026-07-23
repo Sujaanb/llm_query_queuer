@@ -1,8 +1,8 @@
-# Provider architecture and Phase 3 adapters
+# Provider architecture and complete provider adapters
 
 The core scheduler imports only `ProviderAdapter`. Shared DOM visibility, multiline insertion, bounded diagnostics, observer lifecycle, and readiness mechanics live under `src/content/providers/`; every selector registry, URL rule, and provider-specific busy/error phrase remains in its adapter file.
 
-All Phase 2 and Phase 3 optional providers are disabled by default. The service worker requests their exact optional origins only after a side-panel Enable click, registers `assets/content.js` with `chrome.scripting.registerContentScripts`, and unregisters it on disable. ChatGPT remains the only static content script.
+All Phase 2, Phase 3, and Phase 4 optional providers are disabled by default. The service worker requests their exact optional origins only after a side-panel Enable click, registers `assets/content.js` with `chrome.scripting.registerContentScripts`, and unregisters it on disable. ChatGPT remains the only static content script.
 
 ## Adapter contract
 
@@ -117,7 +117,55 @@ Adapters retain only latest assistant length plus a capped 4,000-character tail 
 - **Busy/stability:** coding agent, code/tool calls, terminal execution, multi-step task progress, search/reasoning/generation, Stop, and assistant/tool/task changes.
 - **Errors:** login, usage/rate/quota, verification/access, tool/terminal failure, network, and provider failure.
 
-## Adding a later provider
+## Gemini
+
+- **ID/status:** `gemini`, optional experimental.
+- **Website/origin:** `https://gemini.google.com`, optional `https://gemini.google.com/*`.
+- **Conversation URLs:** `/app/<id>`, `/u/<index>/app/<id>`, `/chat/<id>`; root is temporary.
+- **Selectors:** rich-textarea/QL/contenteditable fallbacks, semantic send/Stop/copy/regenerate controls, model-response candidates, bounded status and account/error regions.
+- **Busy/ready:** thinking, search, generation, extensions, tools, images, workspace activity, Stop, and changing answer/source/tool fingerprints; ready requires stability, an editable composer, no error, and a response control or guarded fallback.
+- **Errors:** login, account chooser, consent, verification/captcha, region/access, rate/quota, network, unavailable.
+- **Multiline/localization:** shared verified textarea/contenteditable plain-text insertion; current status patterns are English.
+- **Experimental/manual:** Google account UI is never touched. Test search, image, extension, consent, and account variants.
+
+## Meta AI
+
+- **ID/status:** `metaai`, optional experimental.
+- **Websites/origins:** `https://meta.ai`, `https://www.meta.ai`.
+- **Conversation URLs:** `/chat/<id>`, `/messages/<id>`; root is temporary.
+- **Selectors:** contenteditable/textarea composer fallbacks, semantic controls, assistant/response candidates, bounded status/login/cookie/consent/error regions.
+- **Busy/ready:** thinking, searching, responding, creating images, tools, Stop, and changing response/source/tool fingerprints.
+- **Errors:** login/recovery, cookie consent, captcha/verification, region/access, rate/quota, network, unavailable.
+- **Multiline/localization:** shared verified plain-text insertion; current status patterns are English.
+- **Experimental/manual:** never accepts cookies or operates account controls. Region/account variants require live testing.
+
+## MiniMax AI
+
+- **ID/status:** `minimax`, optional experimental.
+- **Websites/origins:** root/`www` and agent/`www.agent` variants of `minimax.io`.
+- **Conversation URLs:** `/chat/<id>`, `/agent/<id>`, `/task/<id>`; roots are temporary.
+- **Selectors:** prompt/composer fallbacks, English/Chinese controls, assistant regions, planning/task/file/tool/terminal/output/source trackers.
+- **Busy/ready:** English/Chinese thinking, searching, planning, executing, analyzing, generating, file processing, task/tool/terminal changes, and Stop.
+- **Errors:** English/Chinese login, captcha, access, limits/quota, task/tool failure, network, unavailable.
+- **Multiline/localization:** verified plain-text insertion; NFKC small-status matching covers English and Chinese.
+- **Experimental/manual:** long-horizon tasks can outlive visible answer text; validate each agent tier and task mode.
+
+## Aristotle
+
+- **ID/status:** `aristotle`, optional experimental and access-dependent.
+- **Website/origins:** root, `www`, and wildcard subdomains of `aristotle.science`.
+- **Conversation URLs:** `/chat/<id>`, `/conversation/<id>`, `/thread/<id>`, `/research/<id>`; other routes are temporary.
+- **Selectors:** scientific-chat composer/control fallbacks plus research progress, citations/references, reasoning, document/file/tool, terminal/output, invite/access/verification regions.
+- **Busy/ready:** thinking, research/search, document reading, citations, reasoning, tools, file analysis, Stop, and changing auxiliary fingerprints.
+- **Errors:** verified-researcher/invite/login/access gates, verification/captcha, region, limits/quota, network, unavailable.
+- **Multiline/localization:** shared verified plain-text insertion; current status patterns are English.
+- **Experimental/manual:** authenticated DOM is not publicly stable. Landing-page fail-closed diagnostics are expected without access.
+
+## Experimental selector system
+
+Phase 4 adapters accept validated local selector overrides. Allowed lists merge ahead of defaults; guarded queries ignore invalid selectors. Debug highlighting temporarily outlines composer/send/Stop/response controls and restores styles after five seconds or disposal. See `EXPERIMENTAL_PROVIDERS.md`.
+
+## Maintenance rules
 
 Create a provider-owned adapter/config, export conversation extraction for tests, add disabled metadata, extend the provider union/default maps only when implementation ships, add exact optional origins, add construction to `registry.ts`, and extend permission/URL/selector/diagnostics tests. Never add `<all_urls>`, transcript scanning, remote code, or provider phrases/selectors to the scheduler.
 

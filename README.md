@@ -1,17 +1,17 @@
 # LM Query Queuer
 
-LM Query Queuer is a local-first Chrome Manifest V3 extension that queues prompts while an AI chat is working, then sends them one at a time after the response and any source/tool activity are stable.
+LM Query Queuer is a local-first Chrome Manifest V3 extension that queues prompts while an AI chat is working and sends them sequentially only after response, source, and tool activity is stable.
 
-## Provider support
+## Supported providers
 
-- **Built-in stable:** ChatGPT (`chatgpt.com`, `chat.openai.com`).
-- **Phase 2 optional beta:** Claude, Qwen, Mistral/Vibe, and HuggingChat.
-- **Phase 3 optional beta:** Grok, Kimi, Perplexity, Z.ai, Sakana Chat, and LongCat AI.
-- **Phase 4 planned only:** Gemini, Meta AI, MiniMax AI, and Aristotle.science.
+- **Built-in stable:** ChatGPT.
+- **Phase 2 optional beta:** Claude, Qwen, Mistral/Vibe, HuggingChat.
+- **Phase 3 optional beta:** Grok, Kimi, Perplexity, Z.ai, Sakana Chat, LongCat AI.
+- **Phase 4 optional experimental:** Gemini, Meta AI, MiniMax AI, Aristotle.
 
-Every optional provider is disabled by default. Planned providers have metadata/UI entries but no adapter, optional permission, or runtime script.
+All optional providers are disabled by default. Phase 4 providers are conservative and may require manual selector tuning. Aristotle is additionally access-dependent.
 
-## Install and verify
+## Install, test, build, and load
 
 ```sh
 npm install
@@ -20,58 +20,53 @@ npx tsc --noEmit
 npm run build
 ```
 
-Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `dist`. Rebuild and reload the extension after source changes. Configure the Alt+Q (macOS Control+Q) panel command at `chrome://extensions/shortcuts`.
+Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select this repository's `dist` folder. Rebuild and reload after source changes. Configure the Alt+Q shortcut at `chrome://extensions/shortcuts`.
 
-## Optional access
+## Enabling Phase 4 providers
 
-Open the side panel, find **Providers**, and click **Enable** for a provider. Chrome asks only for that provider's declared origins. The permission request runs directly from the click; the service worker independently verifies the grant before it saves enabled state or dynamically registers `assets/content.js`.
+Open the side panel on a matching site, expand **Providers**, and click **Enable**:
 
-Phase 3 origins are:
+- Gemini requests only `https://gemini.google.com/*`.
+- Meta AI requests only `https://meta.ai/*` and `https://www.meta.ai/*`.
+- MiniMax requests only its `minimax.io` and `agent.minimax.io` host variants.
+- Aristotle requests its root, `www`, and wildcard `aristotle.science` subdomains.
 
-- Grok: `grok.com`, `www.grok.com`
-- Kimi: `kimi.com`, `www.kimi.com`
-- Perplexity: `perplexity.ai`, `www.perplexity.ai`
-- Z.ai: `chat.z.ai`, `z.ai`, `www.z.ai`
-- Sakana Chat: `chat.sakana.ai`
-- LongCat AI: `longcat.ai`, `www.longcat.ai`, `longcat.chat`, `www.longcat.chat`
+Chrome permission requests occur directly from the Enable click. The service worker verifies the grant, saves enabled state, and dynamically registers the shared content script only for that provider. If immediate activation fails, reload the page. Disabling unregisters execution and clears ephemeral tab/leader state while retaining local queues and the Chrome permission. A retained permission never re-enables a provider; startup reconciliation disables enabled state when permission is missing.
 
-If Chrome cannot inject into an already-loaded matching tab, reload it. Disabling unregisters the provider script and clears ephemeral tab/leader state while retaining saved queues and the Chrome permission. A retained permission never silently enables a provider. Startup reconciliation disables any provider whose saved enabled state no longer has permission.
+Required host access remains limited to ChatGPT. The `tabs` permission is used for active-tab side-panel context, messaging, dynamic activation, and tab cleanup. The extension does not request cookies, `webRequest`, debugger, `<all_urls>`, remote code, analytics, or external fonts.
 
-Required host access remains limited to ChatGPT. The extension does not request `<all_urls>`, cookies, `webRequest`, debugger access, remote code, analytics, or external fonts.
+## Experimental behavior
 
-## Queue behavior
+Phase 4 defaults are a 5-second post-ready send delay, 3.5-second stability interval, and 30-second fallback timeout. If the user changes the corresponding global setting, that explicit setting wins. Experimental adapters track bounded fingerprints for the latest answer and provider-specific citation, thinking, tool, task, terminal, output, or file-processing regions. They never retain full answers or source lists.
 
-Enter sends normally while the provider is idle and queues while it is busy. Shift+Enter inserts a newline. Ctrl+Enter (Windows/Linux) or Cmd+Enter (macOS) forces send. Alt/Option+Enter forces queueing. **Always queue messages** makes ordinary Enter queue even while idle.
+When an experimental page remains uncertain—such as a missing composer—the queue waits through the conservative timeout and then pauses with **Provider state uncertain. Queue paused.** Login, consent, captcha, verification, invite, region, access, quota, rate-limit, network, and provider errors pause without attempting a bypass.
 
-The scheduler advances only when the tab is visible, owns the provider+conversation lease, has no error/login/rate-limit state, and the provider adapter reports ready. Phase 3 adapters wait for bounded fingerprints of the latest assistant response plus citation/source, thinking, tool, terminal, or task panels to remain stable. A merely enabled composer does not prove completion. Send failures keep and mark the first item failed and pause the queue; Resume retries it.
+## Queue behavior and limits
 
-The panel supports drag-and-drop ordering, delete, confirmed clear-all, pause/resume, multiline edit, duplicate, Python/JSON list import, and preview.
+Enter queues while busy and sends normally while idle. Shift+Enter inserts a newline; Ctrl/Cmd+Enter forces send; Alt/Option+Enter forces queue. **Always queue messages** queues ordinary Enter even while idle.
 
-## Storage, conversations, and tabs
+A warning appears above 500 queued items. Direct page queueing refuses to grow beyond 1,000 items. Bulk imports that would exceed 1,000 require explicit confirmation. Long queue cards and import previews are collapsed/truncated visually while the full prompt remains in local storage.
 
-Schema v4 stores queues and pause state by provider and conversation in `chrome.storage.local`. Migration preserves Phase 1 ChatGPT data and all Phase 2 schema-v3 queues, pause flags, settings, and enabled-provider choices; the six Phase 3 providers begin disabled.
+## Multiline prompts
 
-New-chat routes use provider/tab temporary keys. When a stable conversation ID appears, a session migration lock merges stable item IDs into the persistent key without duplication. Tab context, leader leases, and migration locks live in `chrome.storage.session`. Leadership is scoped to provider+conversation; a focused visible tab may replace a hidden leader, and non-leaders never send.
+CRLF and CR normalize to LF. Textareas use the native value setter and input events. Contenteditable composers use verified plain-text insertion fallbacks. Every strategy reads the composer back and requires an exact normalized match before send. HTML is not inserted.
 
-## Readiness and localized status
+## Conversations and multi-tab leadership
 
-Selectors and busy/error phrases live in each adapter, not the scheduler. Small status regions are Unicode-normalized with NFKC, whitespace-collapsed, and matched case-insensitively. Kimi and Z.ai include English/Chinese states; Sakana includes English/Japanese states. Full assistant bodies are never searched for localized status phrases.
+Schema v5 stores queues and pause flags by provider and conversation in `chrome.storage.local`; selector overrides are also local. Migration preserves Phase 1–3 queues, settings, pause state, and provider enablement. New chats use provider+tab temporary keys and migrate once a stable URL ID appears under a session migration lock.
 
-Adapters retain only bounded change fingerprints: latest assistant length plus a capped tail, and small capped fingerprints for recent source/tool regions. They do not retain responses, transcripts, DOM snapshots, or MutationRecords. SPA navigation disposes the prior adapter, observer, scheduler, lease heartbeat, listeners, and timers.
+Leader leases live in `chrome.storage.session` and are scoped to provider+conversation. Only one eligible tab sends. Visible focused tabs outrank hidden tabs, stale leaders expire, and different providers or conversations never share queues.
 
-## Debug diagnostics
+## Debug diagnostics, overrides, and highlighting
 
-Enable **Debug mode** to see provider identity, URL, conversation key, composer/control matches, assistant presence, citation/source presence, thinking/tool/task matches, bounded busy/ready/error labels, insertion strategy, leader state, and scheduler state.
+Enable **Debug mode** to see selector matches, assistant/source/thinking/tool/task/terminal presence, bounded busy/ready/error labels, uncertainty, insertion strategy, scheduler state, leader state, experimental status, and active override keys.
 
-**Copy diagnostics** exports only those bounded facts and a persistent/temporary conversation type. It omits actual conversation IDs, temporary keys, prompt text, assistant text, transcript content, and queue items.
+For Phase 4 providers, **Advanced selector overrides** accepts JSON containing only allowed selector keys and CSS selector strings/arrays. Unsafe URLs/code, unknown keys, non-string values, invalid JSON, and invalid CSS are rejected. Overrides take priority over defaults. **Reset provider** restores defaults; **Copy effective selectors** copies the merged registry.
 
-## Troubleshooting
+**Highlight detected elements** outlines the detected composer/send/Stop/response controls without changing layout and restores styles after five seconds or on navigation/disposal. **Copy diagnostics** omits prompt text, answers, transcripts, queue contents, and actual conversation keys.
 
-- Reload an optional provider tab after enabling if the panel says reconnect.
-- If Chrome permission was removed, disable and enable the provider again.
-- Resolve login, captcha, quota, rate-limit, Pro-limit, network, or provider error UI normally before resuming; the extension never bypasses it.
-- Provider UIs change frequently. Debug diagnostics identify which bounded selector classes are missing.
-- Same-origin embedded content can be supported by future selector updates; cross-origin frames are not inspected or bypassed.
-- Run the live matrices in `PHASE2_TESTING.md` and `PHASE3_TESTING.md`, including tools/search and memory soak tests.
+## Privacy and limitations
 
-See `PROVIDERS.md`, `ASSUMPTIONS.md`, and `KNOWN_ISSUES.md` for adapter and beta details.
+All data stays local and queued prompts are inserted only into the selected provider composer. The extension does not interact with account, cookie-consent, verification, captcha, invite, or restriction controls. Provider DOMs vary by experiment, account, language, model, and region, so live validation in `PHASE2_TESTING.md`, `PHASE3_TESTING.md`, and `PHASE4_TESTING.md` remains required.
+
+Known implementations use top-level DOM. Same-origin iframe variants may need future `allFrames` registration and frame leadership work; cross-origin frames are never bypassed. See `EXPERIMENTAL_PROVIDERS.md`, `PROVIDERS.md`, `ASSUMPTIONS.md`, and `KNOWN_ISSUES.md`.

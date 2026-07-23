@@ -1,7 +1,8 @@
 import { DEFAULT_PROVIDER_ENABLEMENT, DEFAULT_SETTINGS, DEFAULT_STORAGE, OPTIONAL_PROVIDER_IDS, RUNTIME_PROVIDER_IDS, SCHEMA_VERSION } from './constants';
 import { createId } from './id';
 import { hasPromptContent, normalizePromptText } from './text';
-import type { OptionalProviderId, ProviderId, QueueItem, QueueItemSource, QueueItemStatus, Settings, StorageState } from './types';
+import { validateSelectorOverrides } from './selectors';
+import type { OptionalProviderId, ProviderId, QueueItem, QueueItemSource, QueueItemStatus, SelectorOverrides, Settings, StorageState } from './types';
 
 type UnknownRecord = Record<string, unknown>;
 export interface MigrationResult { state: StorageState; changed: boolean; backup?: unknown }
@@ -36,26 +37,33 @@ function enablementMap(value: unknown): StorageState['providerEnablement'] {
   const source = isRecord(value) ? value : {};
   return Object.fromEntries(OPTIONAL_PROVIDER_IDS.map((id) => [id, source[id] === true])) as StorageState['providerEnablement'];
 }
+function selectorOverridesMap(value: unknown): StorageState['selectorOverridesByProvider'] {
+  const source = isRecord(value) ? value : {}; const result: Partial<Record<ProviderId, SelectorOverrides>> = {};
+  for (const id of RUNTIME_PROVIDER_IDS) { const validated = validateSelectorOverrides(source[id]); if (validated.ok && Object.keys(validated.value).length) result[id] = validated.value; }
+  return result;
+}
 
 export function migrateStorageSnapshot(input: unknown, now = Date.now()): MigrationResult {
   const raw = isRecord(input) ? input : {};
   const settings = { ...DEFAULT_SETTINGS, ...(isRecord(raw.settings) ? raw.settings as Partial<Settings> : {}) };
   const rawQueues = isRecord(raw.queuesByProvider) ? raw.queuesByProvider : null;
   const rawPaused = isRecord(raw.pausedByProvider) ? raw.pausedByProvider : null;
+  const selectorOverridesByProvider = selectorOverridesMap(raw.selectorOverridesByProvider);
   if (typeof raw.schemaVersion === 'number' && raw.schemaVersion > SCHEMA_VERSION) return { state: structuredClone(DEFAULT_STORAGE), changed: true, backup: input };
   if (raw.schemaVersion === SCHEMA_VERSION && rawQueues && rawPaused && RUNTIME_PROVIDER_IDS.every((id) => isRecord(rawQueues[id]) && isRecord(rawPaused[id]))) {
-    return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: enablementMap(raw.providerEnablement), queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused) }, changed: false };
+    return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: enablementMap(raw.providerEnablement), queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused), selectorOverridesByProvider }, changed: false };
   }
-  if (raw.schemaVersion === 3 && rawQueues && rawPaused && ['chatgpt', 'claude', 'qwen', 'mistral', 'huggingchat'].every((id) => isRecord(rawQueues[id]) && isRecord(rawPaused[id]))) { return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: enablementMap(raw.providerEnablement), queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused) }, changed: true }; }
+  if (raw.schemaVersion === 4 && rawQueues && rawPaused && ['chatgpt', 'claude', 'qwen', 'mistral', 'huggingchat', 'grok', 'kimi', 'perplexity', 'zai', 'sakana', 'longcat'].every((id) => isRecord(rawQueues[id]) && isRecord(rawPaused[id]))) { return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: enablementMap(raw.providerEnablement), queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused), selectorOverridesByProvider }, changed: true }; }
+  if (raw.schemaVersion === 3 && rawQueues && rawPaused && ['chatgpt', 'claude', 'qwen', 'mistral', 'huggingchat'].every((id) => isRecord(rawQueues[id]) && isRecord(rawPaused[id]))) { return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: enablementMap(raw.providerEnablement), queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused), selectorOverridesByProvider: {} }, changed: true }; }
   if (raw.schemaVersion === 2 && rawQueues && rawPaused) {
-    return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: { ...DEFAULT_PROVIDER_ENABLEMENT }, queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused) }, changed: true };
+    return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: { ...DEFAULT_PROVIDER_ENABLEMENT }, queuesByProvider: providerQueueMaps(rawQueues, now), pausedByProvider: providerPauseMaps(rawPaused), selectorOverridesByProvider: {} }, changed: true };
   }
   const chatgptQueues = queueMap(raw.queuesByConversation, now);
   if (Array.isArray(raw.queue)) chatgptQueues['legacy:default'] = (raw.queue as unknown[]).map((item) => queueItem(item, now)).filter((item): item is QueueItem => Boolean(item));
   const queues = providerQueueMaps({}, now); queues.chatgpt = chatgptQueues;
   const paused = providerPauseMaps({}); paused.chatgpt = pauseMap(raw.pausedByConversation);
-  const malformed = raw.schemaVersion === 3 || raw.schemaVersion === SCHEMA_VERSION || (raw.queuesByConversation !== undefined && !isRecord(raw.queuesByConversation));
-  return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: { ...DEFAULT_PROVIDER_ENABLEMENT }, queuesByProvider: queues, pausedByProvider: paused }, changed: true, ...(malformed ? { backup: input } : {}) };
+  const malformed = raw.schemaVersion === 3 || raw.schemaVersion === 4 || raw.schemaVersion === SCHEMA_VERSION || (raw.queuesByConversation !== undefined && !isRecord(raw.queuesByConversation));
+  return { state: { schemaVersion: SCHEMA_VERSION, settings, providerEnablement: { ...DEFAULT_PROVIDER_ENABLEMENT }, queuesByProvider: queues, pausedByProvider: paused, selectorOverridesByProvider: {} }, changed: true, ...(malformed ? { backup: input } : {}) };
 }
 
 let migrationPromise: Promise<StorageState> | null = null;
@@ -75,7 +83,7 @@ export function ensureStorageMigrated(): Promise<StorageState> {
 }
 export async function readStorage(): Promise<StorageState> {
   await ensureStorageMigrated();
-  const raw = await chrome.storage.local.get(['schemaVersion', 'settings', 'providerEnablement', 'queuesByProvider', 'pausedByProvider']);
+  const raw = await chrome.storage.local.get(['schemaVersion', 'settings', 'providerEnablement', 'queuesByProvider', 'pausedByProvider', 'selectorOverridesByProvider']);
   return migrateStorageSnapshot(raw).state;
 }
 export async function updateQueue(providerId: ProviderId, key: string, updater: (items: QueueItem[]) => QueueItem[]): Promise<QueueItem[]> {
@@ -85,6 +93,9 @@ export async function updateQueue(providerId: ProviderId, key: string, updater: 
 export async function setPaused(providerId: ProviderId, key: string, paused: boolean): Promise<void> {
   const state = await readStorage(); const providerPaused = state.pausedByProvider[providerId] ?? {};
   await chrome.storage.local.set({ pausedByProvider: { ...state.pausedByProvider, [providerId]: { ...providerPaused, [key]: paused } } });
+}
+export async function updateSelectorOverrides(providerId: ProviderId, overrides: SelectorOverrides | null): Promise<void> {
+  const state = await readStorage(); const next = { ...state.selectorOverridesByProvider }; if (overrides && Object.keys(overrides).length) next[providerId] = overrides; else delete next[providerId]; await chrome.storage.local.set({ selectorOverridesByProvider: next });
 }
 export async function setProviderEnabled(providerId: OptionalProviderId, enabled: boolean): Promise<void> {
   const state = await readStorage(); await chrome.storage.local.set({ providerEnablement: { ...state.providerEnablement, [providerId]: enabled } });

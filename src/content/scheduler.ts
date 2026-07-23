@@ -1,5 +1,6 @@
 import { readStorage, setPaused, updateQueue } from '../lib/storage';
 import { setItemStatus } from '../lib/queue';
+import { effectiveProviderSettings, runtimeProvider } from '../lib/providers';
 import type { ProviderId, SchedulerState, Settings } from '../lib/types';
 import type { DebugLog } from './debug';
 import type { LeaderElection } from './leader';
@@ -17,6 +18,7 @@ export class Scheduler {
   private autoSubmitting = false;
   private removeProviderObserver: (() => void) | null = null;
   private unavailableSince = 0;
+  private uncertainSince = 0;
   private readonly storageListener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
     if (area === 'local' && (changes.queuesByProvider || changes.pausedByProvider || changes.settings)) void this.tick();
   };
@@ -78,6 +80,7 @@ export class Scheduler {
       const key = this.key();
       const storage = await readStorage();
       const queue = storage.queuesByProvider[this.providerId]?.[key] ?? [];
+      const timing = effectiveProviderSettings(this.providerId, storage.settings);
       if (storage.pausedByProvider[this.providerId]?.[key]) { this.transition('paused'); return; }
       if (!queue.length) { this.transition('idle'); this.sawBusy = false; this.readySince = 0; return; }
       if (!(await this.leader.isLeader())) return;
@@ -87,13 +90,13 @@ export class Scheduler {
       if (this.state === 'waitingAfterSend' || this.sawBusy) {
         if (!this.sawBusy) return;
         if (!this.readySince) this.readySince = Date.now();
-        if (Date.now() - this.readySince < storage.settings.sendDelayMs) { this.transition('ready'); return; }
+        if (Date.now() - this.readySince < timing.sendDelayMs) { this.transition('ready'); return; }
       }
 
       const item = queue[0];
       if (!this.provider.getComposer()) {
         if (!this.unavailableSince) this.unavailableSince = Date.now();
-        if (Date.now() - this.unavailableSince >= storage.settings.fallbackReadyTimeoutMs) await this.fail(item.id, `${this.provider.name} composer was not available.`);
+        if (Date.now() - this.unavailableSince >= timing.fallbackReadyTimeoutMs) await this.fail(item.id, `${this.provider.name} composer was not available.`);
         return;
       }
       this.unavailableSince = 0;
