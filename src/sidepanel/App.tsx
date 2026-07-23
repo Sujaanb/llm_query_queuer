@@ -12,6 +12,13 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { StatusPill } from './components/StatusPill';
 import { useStorageState } from './hooks/useStorage';
 
+function sameStatus(left: TabStatus, right: TabStatus): boolean {
+  return left.supported === right.supported
+    && left.conversationKey === right.conversationKey
+    && left.chatState === right.chatState
+    && left.schedulerState === right.schedulerState;
+}
+
 export default function App() {
   const { state } = useStorageState();
   const [status, setStatus] = useState<TabStatus>({ supported: false });
@@ -22,14 +29,22 @@ export default function App() {
 
   const refreshStatus = useCallback(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || !CHATGPT_URL.test(tab.url ?? '')) { setConnectionFailed(false); setStatus({ supported: false }); return; }
+    if (!tab?.id || !CHATGPT_URL.test(tab.url ?? '')) {
+      setConnectionFailed(false);
+      setStatus((current) => current.supported ? { supported: false } : current);
+      return;
+    }
     try {
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_STATUS' }) as TabStatus;
       setConnectionFailed(false);
-      setStatus(response);
-    } catch { setConnectionFailed(true); setStatus({ supported: true, chatState: 'unknown', schedulerState: 'idle' }); }
+      setStatus((current) => sameStatus(current, response) ? current : response);
+    } catch {
+      setConnectionFailed(true);
+      const fallback: TabStatus = { supported: true, chatState: 'unknown', schedulerState: 'idle' };
+      setStatus((current) => sameStatus(current, fallback) ? current : fallback);
+    }
   }, []);
-  useEffect(() => { void refreshStatus(); const timer = setInterval(refreshStatus, 1000); return () => clearInterval(timer); }, [refreshStatus]);
+  useEffect(() => { void refreshStatus(); const timer = setInterval(refreshStatus, 2000); return () => clearInterval(timer); }, [refreshStatus]);
 
   if (!state) return <div className="grid min-h-screen place-items-center text-xs text-zinc-500">Loading queue…</div>;
   if (!status.supported || !status.conversationKey) return <main className="grid min-h-screen place-items-center p-8 text-center"><div><div className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl bg-zinc-200 text-xl dark:bg-zinc-800">&#8599;</div><h1 className="text-sm font-semibold">{connectionFailed ? 'Reconnect the ChatGPT tab.' : 'Open ChatGPT to use the queue.'}</h1><p className="mt-2 text-xs text-zinc-500">{connectionFailed ? 'Reload this extension, then reload the ChatGPT page.' : 'Switch to a ChatGPT tab, then reopen this panel.'}</p></div></main>;

@@ -32,7 +32,10 @@ export class Scheduler {
       if (previous !== state) void this.tick();
     });
     this.timer = window.setInterval(() => void this.tick(), 1000);
-    chrome.storage.onChanged.addListener(() => void this.tick());
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') return;
+      if (changes.queuesByConversation || changes.pausedByConversation || changes.settings) void this.tick();
+    });
     document.addEventListener('visibilitychange', () => void this.tick());
     void this.tick();
   }

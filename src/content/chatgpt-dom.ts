@@ -1,12 +1,12 @@
-export const SELECTORS = {
+﻿export const SELECTORS = {
   composer: ['#prompt-textarea', 'textarea[placeholder]', 'form textarea', 'div[contenteditable="true"][role="textbox"]', '[role="textbox"][contenteditable="true"]'],
   send: ['button[data-testid*="send" i]', 'button[aria-label*="Send" i]', 'form button[type="submit"]'],
   stop: ['button[data-testid*="stop" i]', 'button[aria-label*="Stop" i]'],
   regenerate: ['button[data-testid*="regenerate" i]', 'button[aria-label*="Regenerate" i]'],
   assistant: ['[data-message-author-role="assistant"]', '.agent-turn', 'article'],
   user: ['[data-message-author-role="user"]'],
-  status: ['[aria-live="polite"]', '[aria-live="assertive"]', '[role="status"]', '[aria-busy="true"]'],
-  errors: ['[role="alert"]', '[aria-live="assertive"]'],
+  status: ['[role="status"]', '[aria-busy="true"]', '[aria-live="polite"]', '[aria-live="assertive"]'],
+  errors: ['[role="alert"]', '[data-testid*="error" i]', '[aria-live="assertive"]'],
 } as const;
 
 export function visible(element: Element | null): element is HTMLElement {
@@ -17,8 +17,9 @@ export function visible(element: Element | null): element is HTMLElement {
 
 export function findVisible(selectors: readonly string[]): HTMLElement | null {
   for (const selector of selectors) {
-    const found = [...document.querySelectorAll(selector)].find(visible);
-    if (found instanceof HTMLElement) return found;
+    for (const found of document.querySelectorAll(selector)) {
+      if (visible(found)) return found;
+    }
   }
   return null;
 }
@@ -28,19 +29,48 @@ export function findComposer(): HTMLTextAreaElement | HTMLElement | null {
 }
 
 export function latestText(selectors: readonly string[]): string {
-  const nodes = selectors.flatMap((selector) => [...document.querySelectorAll(selector)]).filter(visible);
-  return (nodes.at(-1)?.textContent ?? '').trim();
+  for (const selector of selectors) {
+    const nodes = document.querySelectorAll(selector);
+    for (let index = nodes.length - 1; index >= 0; index--) {
+      const node = nodes[index];
+      if (!visible(node)) continue;
+      const text = node.textContent ?? '';
+      if (!text) return '';
+      // Length plus the tail detects continued streaming without retaining a
+      // complete copy of very large assistant messages.
+      return text.length > 12_000 ? `${text.length}:${text.slice(-4_000)}` : text.trim();
+    }
+  }
+  return '';
+}
+
+function boundedText(element: Element, limit = 600): string {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let result = '';
+  let node: Node | null;
+  while (result.length < limit && (node = walker.nextNode())) result += `${node.nodeValue ?? ''} `;
+  return result.slice(0, limit);
+}
+
+function recentVisibleElements(selectors: readonly string[], perSelector = 4): HTMLElement[] {
+  const result: HTMLElement[] = [];
+  for (const selector of selectors) {
+    const nodes = document.querySelectorAll(selector);
+    let added = 0;
+    for (let index = nodes.length - 1; index >= 0 && added < perSelector; index--) {
+      if (visible(nodes[index])) { result.push(nodes[index] as HTMLElement); added++; }
+    }
+  }
+  return result;
 }
 
 export function statusText(): string {
-  return SELECTORS.status.flatMap((selector) => [...document.querySelectorAll(selector)])
-    .filter(visible).map((node) => node.textContent ?? '').join(' ').toLowerCase();
+  return recentVisibleElements(SELECTORS.status).map((node) => boundedText(node)).join(' ').toLowerCase();
 }
 
 export function hasError(): boolean {
   const pattern = /error|rate limit|too many requests|failed|something went wrong|try again later/i;
-  return SELECTORS.errors.flatMap((selector) => [...document.querySelectorAll(selector)])
-    .filter(visible).some((node) => pattern.test(node.textContent ?? ''));
+  return recentVisibleElements(SELECTORS.errors).some((node) => pattern.test(boundedText(node, 1_000)));
 }
 
 export function composerEnabled(): boolean {

@@ -1,4 +1,4 @@
-# ChatGPT Queue
+﻿# ChatGPT Queue
 
 ChatGPT Queue is a local-first Chrome Manifest V3 extension that lets you collect prompts while ChatGPT is working and sends them sequentially only after each response is complete. Queues are saved per conversation in `chrome.storage.local`.
 
@@ -25,6 +25,8 @@ The extension requests `tabs` so its side panel can identify the active ChatGPT 
 
 Open a ChatGPT conversation and click the toolbar icon to open the side panel. Add prompts by typing while ChatGPT is busy, forcing a queue action, or importing a list. Reorder prompts with the drag handle; edit, duplicate, or delete with the item controls. Pause/resume and clear-all are in the header.
 
+The panel is enabled per ChatGPT tab. It closes when you switch to a tab on another site and cannot be opened there.
+
 Default shortcuts:
 
 - Enter: send normally while idle; queue while busy.
@@ -49,6 +51,7 @@ The import panel accepts JSON arrays, Python-style single- or double-quoted list
 - If the queue pauses after a UI error, verify the composer and send button are present, then resume.
 - Reload the extension after rebuilding.
 - Inspect the ChatGPT tab console for `[ChatGPT Queue]` diagnostics.
+- If Chrome reports an out-of-memory page after many unusually long responses, start a fresh ChatGPT conversation and close unused ChatGPT tabs. The extension limits its DOM scanning and storage updates, but ChatGPT still retains the rendered conversation itself.
 - ChatGPT UI changes may require selector maintenance in `src/content/chatgpt-dom.ts`.
 
 ## Manual test checklist

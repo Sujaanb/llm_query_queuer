@@ -1,4 +1,4 @@
-import type { ChatState, Settings } from '../lib/types';
+﻿import type { ChatState, Settings } from '../lib/types';
 import { composerEnabled, findVisible, hasError, latestText, SELECTORS, statusText } from './chatgpt-dom';
 
 const BUSY: Array<[RegExp, ChatState]> = [
@@ -20,15 +20,16 @@ export class StateDetector {
 
   start() {
     this.observer = new MutationObserver(() => this.schedule());
-    this.observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-busy', 'aria-disabled', 'disabled'] });
-    this.interval = window.setInterval(() => this.evaluate(), 1000);
+    const observationRoot = document.querySelector('main') ?? document.body;
+    this.observer.observe(observationRoot, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-busy', 'aria-disabled', 'disabled'] });
+    this.interval = window.setInterval(() => this.evaluate(), 1500);
     this.evaluate();
   }
   stop() { this.observer?.disconnect(); if (this.interval) clearInterval(this.interval); }
   private schedule() {
     if (this.scheduled) return;
     this.scheduled = true;
-    setTimeout(() => { this.scheduled = false; this.evaluate(); }, 100);
+    setTimeout(() => { this.scheduled = false; this.evaluate(); }, 250);
   }
   private evaluate() {
     const now = Date.now();
