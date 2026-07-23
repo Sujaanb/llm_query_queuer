@@ -1,46 +1,19 @@
 {
   "manifest_version": 3,
   "name": "LM Query Queuer",
-  "version": "2.0.0",
-  "description": "Queue prompts safely with per-conversation, multi-tab-aware scheduling.",
-  "permissions": [
-    "storage",
-    "sidePanel",
-    "tabs"
-  ],
-  "host_permissions": [
-    "https://chatgpt.com/*",
-    "https://chat.openai.com/*"
-  ],
-  "action": {
-    "default_title": "Open LM Query Queuer"
-  },
-  "background": {
-    "service_worker": "assets/background.js",
-    "type": "module"
-  },
-  "side_panel": {
-    "default_path": "src/sidepanel/index.html"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://chat.openai.com/*"
-      ],
-      "js": [
-        "assets/content.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
-  "commands": {
-    "open-queue-panel": {
-      "suggested_key": {
-        "default": "Alt+Q",
-        "mac": "MacCtrl+Q"
-      },
-      "description": "Open LM Query Queuer panel"
-    }
-  }
+  "version": "4.0.0",
+  "description": "Queue prompts safely across ChatGPT and ten optional AI chat providers.",
+  "permissions": ["storage", "sidePanel", "tabs", "scripting"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "action": { "default_title": "Open LM Query Queuer" },
+  "background": { "service_worker": "assets/background.js", "type": "module" },
+  "side_panel": { "default_path": "src/sidepanel/index.html" },
+  "content_scripts": [{ "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"], "js": ["assets/content.js"], "run_at": "document_idle" }],
+  "commands": { "open-queue-panel": { "suggested_key": { "default": "Alt+Q", "mac": "MacCtrl+Q" }, "description": "Open LM Query Queuer panel" } },
+  "optional_host_permissions": [
+    "https://claude.ai/*", "https://www.claude.ai/*", "https://chat.qwen.ai/*", "https://chat.mistral.ai/*", "https://huggingface.co/chat/*",
+    "https://grok.com/*", "https://www.grok.com/*", "https://kimi.com/*", "https://www.kimi.com/*", "https://perplexity.ai/*", "https://www.perplexity.ai/*",
+    "https://chat.z.ai/*", "https://z.ai/*", "https://www.z.ai/*", "https://chat.sakana.ai/*",
+    "https://longcat.ai/*", "https://www.longcat.ai/*", "https://longcat.chat/*", "https://www.longcat.chat/*"
+  ]
 }

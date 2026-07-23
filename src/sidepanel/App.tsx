@@ -1,68 +1,47 @@
-import { useCallback, useEffect, useState } from 'react';
-import { providerForUrl } from '../lib/providers';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { optionalProvider, providerForUrl, runtimeProvider } from '../lib/providers';
 import { appendPrompts, clearItems, deleteItem, duplicateItem, editItem, reorderItem } from '../lib/queue';
 import { setPaused, updateQueue, updateSettings } from '../lib/storage';
-import type { QueueItem, TabStatus } from '../lib/types';
+import type { ProviderId, ProviderPermissionState, QueueItem, TabStatus } from '../lib/types';
 import { shortcutLabels } from '../lib/platform';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { EditPromptDialog } from './components/EditPromptDialog';
 import { ImportPanel } from './components/ImportPanel';
+import { ProvidersPanel } from './components/ProvidersPanel';
 import { QueueList } from './components/QueueList';
 import { SettingsPanel } from './components/SettingsPanel';
 import { StatusPill } from './components/StatusPill';
 import { useStorageState } from './hooks/useStorage';
 
-function sameStatus(a: TabStatus, b: TabStatus): boolean {
-  return a.supported === b.supported && a.planned === b.planned && a.providerName === b.providerName && a.conversationKey === b.conversationKey && a.chatState === b.chatState && a.schedulerState === b.schedulerState && a.isLeader === b.isLeader;
-}
-
+function sameStatus(a: TabStatus, b: TabStatus): boolean { return a.supported === b.supported && a.planned === b.planned && a.disabled === b.disabled && a.providerId === b.providerId && a.providerName === b.providerName && a.conversationKey === b.conversationKey && a.chatState === b.chatState && a.schedulerState === b.schedulerState && a.isLeader === b.isLeader && a.diagnostics?.lastCheckedAt === b.diagnostics?.lastCheckedAt; }
 export default function App() {
-  const { state } = useStorageState();
-  const [status, setStatus] = useState<TabStatus>({ supported: false });
-  const [connectionFailed, setConnectionFailed] = useState(false);
-  const [clearOpen, setClearOpen] = useState(false);
-  const [editing, setEditing] = useState<QueueItem | null>(null);
-  const shortcuts = shortcutLabels();
-  const refreshStatus = useCallback(async (includeHidden = false) => {
-    if (document.hidden && !includeHidden) return;
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const metadata = providerForUrl(tab?.url);
+  const { state } = useStorageState(); const [status, setStatus] = useState<TabStatus>({ supported: false }); const [connectionFailed, setConnectionFailed] = useState(false); const [providers, setProviders] = useState<ProviderPermissionState[]>([]); const providersRef = useRef<ProviderPermissionState[]>([]);
+  const [providerMessage, setProviderMessage] = useState(''); const [providerPending, setProviderPending] = useState<ProviderId | null>(null); const [clearOpen, setClearOpen] = useState(false); const [editing, setEditing] = useState<QueueItem | null>(null); const shortcuts = shortcutLabels();
+  const refreshProviders = useCallback(async () => { try { const next = await chrome.runtime.sendMessage({ type: 'GET_PROVIDER_STATES' }) as ProviderPermissionState[]; providersRef.current = next; setProviders(next); return next; } catch { return providersRef.current; } }, []);
+  const refreshStatus = useCallback(async (includeHidden = false, knownProviders?: ProviderPermissionState[]) => {
+    if (document.hidden && !includeHidden) return; const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); const metadata = providerForUrl(tab?.url);
     if (!tab?.id || !metadata) { setConnectionFailed(false); setStatus((old) => sameStatus(old, { supported: false }) ? old : { supported: false }); return; }
-    if (!metadata.enabled) { const planned = { supported: false, planned: true, providerName: metadata.name }; setConnectionFailed(false); setStatus((old) => sameStatus(old, planned) ? old : planned); return; }
-    try {
-      const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_STATUS' }) as TabStatus;
-      setConnectionFailed(false); setStatus((old) => sameStatus(old, response) ? old : response);
-    } catch {
-      const fallback: TabStatus = { supported: true, providerName: metadata.name, chatState: 'unknown', schedulerState: 'idle' };
-      setConnectionFailed(true); setStatus((old) => sameStatus(old, fallback) ? old : fallback);
-    }
+    const runtime = runtimeProvider(metadata.id); if (!runtime) { const planned = { supported: false, planned: true, providerName: metadata.name }; setConnectionFailed(false); setStatus((old) => sameStatus(old, planned) ? old : planned); return; }
+    const permission = (knownProviders ?? providersRef.current).find((provider) => provider.id === runtime.id); if (runtime.id !== 'chatgpt' && !permission?.enabled) { const disabled: TabStatus = { supported: false, disabled: true, providerId: runtime.id, providerName: runtime.name }; setConnectionFailed(false); setStatus((old) => sameStatus(old, disabled) ? old : disabled); return; }
+    try { const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_STATUS' }) as TabStatus; setConnectionFailed(false); setStatus((old) => sameStatus(old, response) ? old : response); }
+    catch { const fallback: TabStatus = { supported: true, providerId: runtime.id, providerName: runtime.name, chatState: 'unknown', schedulerState: 'idle' }; setConnectionFailed(true); setStatus((old) => sameStatus(old, fallback) ? old : fallback); }
   }, []);
   useEffect(() => {
-    void refreshStatus(true);
-    const timer = window.setInterval(() => void refreshStatus(), 2000);
-    const activated = () => void refreshStatus(true);
-    const updated = (_id: number, change: { url?: string; status?: string }) => { if (change.url || change.status) void refreshStatus(true); };
-    const visibility = () => { if (!document.hidden) void refreshStatus(true); };
-    chrome.tabs.onActivated.addListener(activated); chrome.tabs.onUpdated.addListener(updated); document.addEventListener('visibilitychange', visibility);
-    return () => { clearInterval(timer); chrome.tabs.onActivated.removeListener(activated); chrome.tabs.onUpdated.removeListener(updated); document.removeEventListener('visibilitychange', visibility); };
-  }, [refreshStatus]);
-
-  if (!state) return <div className="grid min-h-screen place-items-center text-xs text-zinc-500">Loading queue?</div>;
+    void (async () => { const list = await refreshProviders(); await refreshStatus(true, list); })(); const timer = window.setInterval(() => void refreshStatus(), 2000); const activated = () => void refreshStatus(true); const updated = (_id: number, change: { url?: string; status?: string }) => { if (change.url || change.status) void refreshStatus(true); }; const visibility = () => { if (!document.hidden) void refreshStatus(true); };
+    chrome.tabs.onActivated.addListener(activated); chrome.tabs.onUpdated.addListener(updated); document.addEventListener('visibilitychange', visibility); return () => { clearInterval(timer); chrome.tabs.onActivated.removeListener(activated); chrome.tabs.onUpdated.removeListener(updated); document.removeEventListener('visibilitychange', visibility); };
+  }, [refreshProviders, refreshStatus]);
+  const toggleProvider = useCallback(async (provider: ProviderPermissionState) => { const runtime = runtimeProvider(provider.id); if (!runtime || runtime.id === 'chatgpt') return; setProviderPending(runtime.id); setProviderMessage(''); try { if (!provider.enabled) { const metadata = optionalProvider(runtime.id); if (!metadata) { setProviderMessage('Provider is not available.'); return; } const granted = await chrome.permissions.request({ origins: [...metadata.optionalOrigins] }); if (!granted) { setProviderMessage('Permission request was denied.'); return; } } const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); const response = await chrome.runtime.sendMessage({ type: provider.enabled ? 'DISABLE_PROVIDER' : 'ENABLE_PROVIDER', providerId: runtime.id, tabId: tab?.id }) as { ok?: boolean; message?: string }; setProviderMessage(response.message ?? (response.ok ? 'Provider state updated.' : 'Provider state could not be updated.')); const list = await refreshProviders(); await refreshStatus(true, list); } catch { setProviderMessage('Provider state could not be updated.'); } finally { setProviderPending(null); } }, [refreshProviders, refreshStatus]);
+  if (!state) return <div className="grid min-h-screen place-items-center text-xs text-zinc-500">Loading queue...</div>;
+  const providerSection = <ProvidersPanel providers={providers} pending={providerPending} message={providerMessage} onToggle={(provider) => void toggleProvider(provider)} />;
   if (!status.supported || !status.conversationKey) {
-    const heading = status.planned ? 'This provider is planned but not enabled yet.' : connectionFailed ? `Reconnect the ${status.providerName ?? 'AI chat'} tab.` : 'Open a supported AI chat website to use LM Query Queuer.';
-    const detail = status.planned ? `${status.providerName} support is intentionally disabled in Phase 1.` : connectionFailed ? 'Reload the extension, then reload the provider page.' : 'Phase 1 supports ChatGPT on chatgpt.com and chat.openai.com.';
-    return <main className="grid min-h-screen place-items-center p-8 text-center"><div><div className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl bg-zinc-200 text-xl dark:bg-zinc-800">?</div><h1 className="text-sm font-semibold">{heading}</h1><p className="mt-2 text-xs text-zinc-500">{detail}</p></div></main>;
+    const activePermission = providers.find((provider) => provider.id === status.providerId); const heading = status.disabled ? `${status.providerName} support is disabled.` : status.planned ? 'This provider is planned but not enabled yet.' : connectionFailed ? `Reconnect the ${status.providerName ?? 'AI chat'} tab.` : 'Open a supported AI chat website to use LM Query Queuer.';
+    const detail = status.disabled ? `Enable ${status.providerName} to queue prompts on this site.` : status.planned ? `${status.providerName} remains a future provider.` : connectionFailed ? 'Reload this provider page so the content script can start.' : 'Phase 3 supports ChatGPT plus ten optional providers. Enable only the sites you use.';
+    return <main className="min-h-screen p-3"><header className="mb-3"><h1 className="text-base font-semibold">LM Query Queuer</h1></header><div className="space-y-3"><section className="card p-6 text-center"><h2 className="text-sm font-semibold">{heading}</h2><p className="mt-2 text-xs text-zinc-500">{detail}</p>{status.disabled && activePermission && <button className="btn-primary mt-4" disabled={providerPending === activePermission.id} onClick={() => void toggleProvider(activePermission)}>Enable {activePermission.name}</button>}</section>{providerSection}</div></main>;
   }
-  const providerId = status.providerId ?? 'chatgpt';
-  const key = status.conversationKey;
-  const items = state.queuesByProvider[providerId]?.[key] ?? [];
-  const paused = Boolean(state.pausedByProvider[providerId]?.[key]);
-  const mutate = (operation: (items: QueueItem[]) => QueueItem[]) => void updateQueue(providerId, key, operation);
-  const chatTone = status.chatState === 'error' ? 'bad' : ['idle', 'ready'].includes(status.chatState ?? '') ? 'good' : 'warn';
-  return <main className="min-h-screen p-3">
-    <header className="sticky top-0 z-20 -mx-3 -mt-3 mb-3 border-b border-zinc-200 bg-zinc-50/90 px-3 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90"><div className="flex items-center justify-between"><div><h1 className="text-base font-semibold tracking-tight">LM Query Queuer</h1><p className="mt-0.5 text-[11px] text-zinc-500">{status.providerName} ? {status.conversationId ? 'Conversation queue' : 'New chat queue'}</p><div className="mt-1 flex gap-1.5"><StatusPill label={status.chatState ?? 'unknown'} tone={chatTone} /><StatusPill label={paused ? 'paused' : status.schedulerState ?? 'idle'} tone={paused ? 'warn' : 'neutral'} /><StatusPill label={status.isLeader ? 'leader' : 'viewer'} tone={status.isLeader ? 'good' : 'neutral'} /></div></div><div className="flex gap-1.5"><button className="btn" onClick={() => void setPaused(providerId, key, !paused)}>{paused ? 'Resume' : 'Pause'}</button><button className="btn" disabled={!items.length || items.some((item) => item.status === 'sending')} onClick={() => setClearOpen(true)}>Clear all</button></div></div></header>
-    <div className="space-y-3"><section><div className="mb-2 flex items-center justify-between px-1"><h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Queue</h2><span className="text-xs tabular-nums text-zinc-400">{items.length}</span></div>{items.length ? <QueueList items={items} onReorder={(a, b) => mutate((q) => reorderItem(q, a, b))} onEdit={setEditing} onDuplicate={(id) => mutate((q) => duplicateItem(q, id))} onDelete={(id) => mutate((q) => deleteItem(q, id))} /> : <div className="card px-4 py-10 text-center"><p className="text-sm font-medium">No queued prompts</p><p className="mt-2 text-xs text-zinc-500">Force queue with <kbd>{shortcuts.forceQueue}</kbd><br />Force send with <kbd>{shortcuts.forceSend}</kbd></p></div>}</section><ImportPanel onImport={(prompts) => mutate((q) => appendPrompts(q, prompts))} /><SettingsPanel settings={state.settings} onChange={(patch) => void updateSettings(patch)} /><p className="px-2 pb-3 text-center text-[10px] text-zinc-400">Open panel: {shortcuts.open} ? Queues stay in local Chrome storage</p></div>
-    <ConfirmDialog open={clearOpen} onCancel={() => setClearOpen(false)} onConfirm={() => { mutate(clearItems); setClearOpen(false); }} />
-    <EditPromptDialog text={editing?.text ?? null} onCancel={() => setEditing(null)} onSave={(text) => { if (editing) mutate((q) => editItem(q, editing.id, text)); setEditing(null); }} />
+  const providerId = status.providerId ?? 'chatgpt'; const key = status.conversationKey; const items = state.queuesByProvider[providerId]?.[key] ?? []; const paused = Boolean(state.pausedByProvider[providerId]?.[key]); const mutate = (operation: (items: QueueItem[]) => QueueItem[]) => void updateQueue(providerId, key, operation); const chatTone = status.chatState === 'error' ? 'bad' : ['idle', 'ready'].includes(status.chatState ?? '') ? 'good' : 'warn';
+  return <main className="min-h-screen p-3"><header className="sticky top-0 z-20 -mx-3 -mt-3 mb-3 border-b border-zinc-200 bg-zinc-50/90 px-3 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90"><div className="flex items-center justify-between"><div><h1 className="text-base font-semibold tracking-tight">LM Query Queuer</h1><p className="mt-0.5 text-[11px] text-zinc-500">{status.providerName} - {status.conversationId ? status.conversationId : 'temporary conversation'}</p><div className="mt-1 flex gap-1.5"><StatusPill label={status.chatState ?? 'unknown'} tone={chatTone} /><StatusPill label={paused ? 'paused' : status.schedulerState ?? 'idle'} tone={paused ? 'warn' : 'neutral'} /><StatusPill label={status.isLeader ? 'leader' : 'viewer'} tone={status.isLeader ? 'good' : 'neutral'} /></div></div><div className="flex gap-1.5"><button className="btn" onClick={() => void setPaused(providerId, key, !paused)}>{paused ? 'Resume' : 'Pause'}</button><button className="btn" disabled={!items.length || items.some((item) => item.status === 'sending')} onClick={() => setClearOpen(true)}>Clear all</button></div></div></header>
+    <div className="space-y-3"><section><div className="mb-2 flex items-center justify-between px-1"><h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Queue</h2><span className="text-xs tabular-nums text-zinc-400">{items.length}</span></div>{items.length ? <QueueList items={items} onReorder={(a, b) => mutate((q) => reorderItem(q, a, b))} onEdit={setEditing} onDuplicate={(id) => mutate((q) => duplicateItem(q, id))} onDelete={(id) => mutate((q) => deleteItem(q, id))} /> : <div className="card px-4 py-10 text-center"><p className="text-sm font-medium">No queued prompts</p><p className="mt-2 text-xs text-zinc-500">Force queue with <kbd>{shortcuts.forceQueue}</kbd><br />Force send with <kbd>{shortcuts.forceSend}</kbd></p></div>}</section><ImportPanel onImport={(prompts) => mutate((q) => appendPrompts(q, prompts))} /><SettingsPanel settings={state.settings} onChange={(patch) => void updateSettings(patch)} />{state.settings.debugMode && status.diagnostics && <DiagnosticsPanel diagnostics={status.diagnostics} leader={Boolean(status.isLeader)} scheduler={status.schedulerState} />}{providerSection}<p className="px-2 pb-3 text-center text-[10px] text-zinc-400">Open panel: {shortcuts.open} - Queues stay in local Chrome storage</p></div>
+    <ConfirmDialog open={clearOpen} onCancel={() => setClearOpen(false)} onConfirm={() => { mutate(clearItems); setClearOpen(false); }} /><EditPromptDialog text={editing?.text ?? null} onCancel={() => setEditing(null)} onSave={(text) => { if (editing) mutate((q) => editItem(q, editing.id, text)); setEditing(null); }} />
   </main>;
 }

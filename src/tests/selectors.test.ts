@@ -1,0 +1,9 @@
+import { describe, expect, it } from 'vitest'; import { findVisible, isElementVisible } from '../content/providers/dom';
+const style = (overrides: Partial<{ display: string; visibility: string; opacity: string; position: string }> = {}) => ({ display: 'block', visibility: 'visible', opacity: '1', position: 'static', ...overrides });
+function element(options: { hidden?: boolean; disabled?: boolean; rects?: number } = {}) { return { disabled: options.disabled ?? false, getAttribute: (name: string) => name === 'aria-hidden' && options.hidden ? 'true' : null, hasAttribute: () => false, getClientRects: () => Array.from({ length: options.rects ?? 1 }) } as unknown as Element; }
+describe('selector utilities', () => {
+  it('resolves fallback selectors in order', () => { const target = element(); const root = { querySelectorAll: (selector: string) => selector === '.second' ? [target] : [] } as unknown as ParentNode; expect(findVisible(['.first', '.second'], root, () => true)).toBe(target); });
+  it('filters aria-hidden elements', () => expect(isElementVisible(element({ hidden: true }), () => style() as CSSStyleDeclaration)).toBe(false));
+  it('filters disabled controls', () => expect(isElementVisible(element({ disabled: true }), () => style() as CSSStyleDeclaration)).toBe(false));
+  it('filters elements without layout boxes and display-none elements', () => { expect(isElementVisible(element({ rects: 0 }), () => style() as CSSStyleDeclaration)).toBe(false); expect(isElementVisible(element(), () => style({ display: 'none' }) as CSSStyleDeclaration)).toBe(false); });
+});

@@ -1,50 +1,124 @@
-# Provider extension guide
+# Provider architecture and Phase 3 adapters
 
-Phase 1 enables only ChatGPT. Future adapters must remain disabled until their host permission, automated tests, and manual validation ship together.
+The core scheduler imports only `ProviderAdapter`. Shared DOM visibility, multiline insertion, bounded diagnostics, observer lifecycle, and readiness mechanics live under `src/content/providers/`; every selector registry, URL rule, and provider-specific busy/error phrase remains in its adapter file.
+
+All Phase 2 and Phase 3 optional providers are disabled by default. The service worker requests their exact optional origins only after a side-panel Enable click, registers `assets/content.js` with `chrome.scripting.registerContentScripts`, and unregisters it on disable. ChatGPT remains the only static content script.
 
 ## Adapter contract
 
-`src/content/providers/types.ts` defines `ProviderAdapter` and capability flags. An adapter supplies identity/matching metadata; conversation and temporary keys; composer lookup/read/write/clear/verification; send/readiness/busy/error behavior; control classification; one lifecycle-safe observer subscription; and complete disposal. The core scheduler calls only this interface and must never import provider selectors or text patterns.
+`types.ts` defines identity, capabilities, keyboard profile, conversation identity, composer read/write/verification, send controls, busy/ready/error state, diagnostics, observation, and disposal. `base.ts` provides the memory-safe state implementation. `composer.ts` normalizes CRLF/CR to LF and verifies every textarea/contenteditable strategy. `dom.ts` resolves fallback selectors and filters hidden or disabled elements.
 
-## Add a provider
+Adapters retain only latest assistant length plus a capped 4,000-character tail and small capped fingerprints for recent citation/source/thinking/tool/task regions. Readiness waits for both response and auxiliary fingerprints to stabilize. Status matching applies NFKC/case/whitespace normalization only to small status regions. Diagnostics store labels and selector booleans, never prompt/assistant bodies, and cap item counts and label length.
 
-1. Create `src/content/providers/<provider>.ts` implementing `ProviderAdapter`.
-2. Centralize every selector, working/error phrase, and DOM heuristic in that file.
-3. Add enabled construction to `src/content/providers/registry.ts` only when the adapter is ready.
-4. Change the matching metadata entry in `src/lib/providers.ts` from disabled to enabled.
-5. Add the exact origin to `host_permissions` and the content-script `matches` in `public/manifest.json`. Prefer optional host permissions in a later permission-onboarding phase; never add `<all_urls>`.
-6. Extend the `ProviderId` union and initialize its maps in schema defaults/migration.
+## ChatGPT
 
-Disabled metadata alone is safe: it provides a planned-provider panel label but receives no host access and creates no adapter or scheduler.
+- **ID / status:** `chatgpt`, built-in stable.
+- **Origins:** required `https://chatgpt.com/*`, `https://chat.openai.com/*`.
+- **Conversation URL:** `/c/<id>`; other routes use a provider/tab temporary key.
+- **Selectors:** `#prompt-textarea`, textarea/contenteditable role fallbacks, ChatGPT test IDs and aria labels.
+- **Busy:** Stop, thinking, searching, browsing, analyzing, reasoning, assistant text changing.
+- **Ready:** no busy/error signal, stable assistant response, enabled composer, response/copy control or guarded fallback.
+- **Errors:** status/alert regions for limits, failures, login, captcha, and unavailability.
 
-## Conversation identity
+## Claude
 
-Extract a stable server conversation ID from the URL or provider state without reading transcript content. Return `null` until it exists. Use the tab-specific temporary key supplied by the content controller for new chats. On the SPA transition to a real ID, the controller disposes the old runtime and merges temporary items by stable ID. Never derive identity from a prompt or assistant response.
+- **ID / status:** `claude`, optional beta.
+- **Official website:** `https://claude.ai` (also `https://www.claude.ai`).
+- **Optional origins:** `https://claude.ai/*`, `https://www.claude.ai/*`.
+- **Conversation URLs:** `/chat/<id>`; `/new` and other paths are temporary.
+- **Selector strategy:** Claude composer/test-ID candidates, Message-labelled contenteditable, textbox and textarea fallbacks; aria/test-ID send/Stop/copy controls; main assistant/status regions only.
+- **Busy indicators:** thinking, reasoning, search/reading, analysis/working, tool use, artifact work, code execution, Stop, or changing main assistant text.
+- **Ready indicators:** main assistant stable, Stop/working absent, composer editable, response/copy control or guarded fallback. Artifact panel activity is not used as a completion signal.
+- **Errors:** main alert/login/usage regions for login, usage/message limit, quota, rate limit, captcha/Cloudflare, network, or service failures.
+- **Multiline notes:** shared contenteditable-first fallbacks with exact read-back verification; textarea fallback remains available.
+- **Caveats/manual notes:** validate analysis, artifact creation, tool/code work, and the final-answer boundary before enabling unattended queues.
 
-## Composer and multiline insertion
+## Qwen
 
-Support textarea and/or contenteditable composers as capabilities require. Normalize CRLF/CR to LF, but do not trim, collapse whitespace, or turn newlines into spaces. For textareas use the prototype native value setter and a bubbling `input` event. For contenteditable try plain-text `execCommand('insertText')`, a `DataTransfer`/`text/plain` paste event, then plain text nodes with `beforeinput`/`input`. Avoid HTML. If a provider absolutely requires HTML, sanitize all content and represent only line breaks?never interpolate prompt text as markup.
+- **ID / status:** `qwen`, optional beta.
+- **Official website / origin:** `https://chat.qwen.ai`, optional `https://chat.qwen.ai/*`.
+- **Conversation URLs:** `/chat/<id>`, with `/c/<id>` and `/conversation/<id>` defensive fallbacks; root is temporary.
+- **Selector strategy:** prompt/chat IDs, composer test IDs, Ask/Message textareas, textbox fallback, semantic send/submit/Stop/retry controls.
+- **Busy indicators:** thinking/generating, reasoning, search/reading, agent/tool/code/running/working, Stop, changing assistant text.
+- **Ready indicators:** all working signals absent, assistant stable, composer editable, response control or guarded fallback.
+- **Errors:** alert/limit regions for rate, usage/message limit, quota, login, captcha, network, or provider errors.
+- **Multiline notes:** native textarea path is preferred when found; contenteditable uses shared verified fallbacks.
+- **Caveats/manual notes:** validate thinking mode, web search, code generation, and agent-like workflows.
 
-After each strategy, read the composer and compare the exact normalized text. Return the successful strategy. If every strategy fails, return failure; the scheduler will mark the item failed and pause.
+## Mistral / Vibe
 
-## Busy and ready detection
+- **ID / status:** `mistral`, optional beta.
+- **Official website / origin:** `https://chat.mistral.ai/chat`, optional `https://chat.mistral.ai/*`.
+- **Conversation URLs:** `/chat/<id>`; `/`, `/chat`, and other new-chat paths are temporary.
+- **Selector strategy:** prompt/chat IDs, composer test IDs, Ask/Message textareas, textbox fallback, semantic send/Stop/regenerate/copy controls.
+- **Busy indicators:** thinking/generating, reasoning, search/reading, agent/tool/code/running/multi-step work, Stop, changing assistant text.
+- **Ready indicators:** no agent/work/Stop signal, stable final assistant response, enabled composer, response control or guarded fallback.
+- **Errors:** alert/limit regions for usage, quota, login, captcha, network, rate limit, or provider failure.
+- **Multiline notes:** shared verified textarea/contenteditable engine.
+- **Caveats/manual notes:** Vibe agent/work mode can outlive visible text generation; validate its active-state labels and search/tool completion.
 
-Use the smallest stable combination of provider-owned signals:
+## HuggingChat
 
-- visible Stop/cancel/working controls;
-- thinking, searching, browsing, analyzing, or reasoning status regions;
-- `aria-busy` and disabled states;
-- a bounded signature (length plus capped tail) for latest assistant-text change;
-- response-complete/regenerate/copy controls;
-- composer enabled state; and
-- visible error/rate-limit banners.
+- **ID / status:** `huggingchat`, optional beta.
+- **Official website / origin:** `https://huggingface.co/chat`, optional `https://huggingface.co/chat/*`.
+- **Conversation URLs:** `/chat/<id>`; `/chat/` is temporary.
+- **Selector strategy:** open chat-ui style `textarea[name="prompt"]`, prompt/chat IDs, form textarea, semantic send/submit and Stop/title fallbacks, assistant/prose candidates.
+- **Busy indicators:** generating/thinking, working/running, search/reading, Stop, or changing assistant text.
+- **Ready indicators:** generating/Stop absent, assistant stable, textarea enabled, response/retry/copy control or guarded fallback.
+- **Errors:** alert/login regions for authentication, rate/usage limits, captcha/Cloudflare, network, or service errors.
+- **Multiline notes:** native textarea value setter is preferred and exactly verified; contenteditable fallback remains safe.
+- **Caveats/manual notes:** test model switching, Stop generation, and model-specific response controls.
 
-Do not treat composer-enabled alone as ready. Require no busy/error signal and a stability delay; use the fallback timeout only when the composer is enabled, latest response is stable, and no busy/error signal exists.
+## Grok
 
-## Observer and memory rules
+- **ID / status:** `grok`, optional Phase 3 beta.
+- **Origins:** `https://grok.com/*`, `https://www.grok.com/*`.
+- **Conversation URL:** `/chat/<id>`.
+- **Busy/stability:** search and X/web-source work, thinking/reasoning, image generation, result cards, citations, Stop, and changing assistant/source/tool fingerprints.
+- **Errors:** login, verification/captcha, access denied, usage/rate/quota, network, and provider failure.
 
-Create at most one MutationObserver per adapter instance, debounce callbacks, and use no interval faster than 500 ms (the ChatGPT fallback is 1.5 seconds). Store no MutationRecords, DOM nodes, transcripts, or full long responses. Re-query elements, cap text signatures, and remove every observer/listener/timer in `dispose()`. The observer unsubscribe must not leave monitoring callbacks behind. Test at least 50 SPA conversation switches and a 30-minute Chrome Task Manager soak.
+## Kimi
 
-## Manual provider validation
+- **ID / status:** `kimi`, optional Phase 3 beta.
+- **Origins:** `https://kimi.com/*`, `https://www.kimi.com/*`.
+- **Conversation URL:** `/chat/<id>`.
+- **Busy/stability:** English/Chinese thinking, deep-thinking, searching, analyzing/file-analysis, generating, source panels, and assistant/auxiliary changes.
+- **Errors:** English/Chinese login, frequency/usage limit, captcha/access, network, and provider failure.
 
-Verify unsupported pages receive no injection; new and existing conversation IDs; temporary-key migration; single-line and boundary-blank multiline insertion; idle/busy/error detection; send acceptance; Stop/manual-send pause; two different conversations; the same conversation in two tabs; leader closure/takeover; side-panel provider label; imports/edits/reordering; reload persistence; route-switch cleanup; and the full memory soak. Add parser/queue tests only for shared changes and provider-focused unit/DOM tests for adapter behavior.
+## Perplexity
+
+- **ID / status:** `perplexity`, optional Phase 3 beta.
+- **Origins:** `https://perplexity.ai/*`, `https://www.perplexity.ai/*`.
+- **Conversation URLs:** `/search/<id>` and observed `/page/<id>`; unmatched routes remain temporary.
+- **Busy/stability:** search/browse/read/synthesize states and changing answer, source, citation, or result-card fingerprints. A visible stable source panel does not block forever.
+- **Errors:** Pro/usage/rate/quota limits, login, verification/access, network, and provider failure.
+
+## Z.ai
+
+- **ID / status:** `zai`, optional Phase 3 beta.
+- **Origins:** `https://chat.z.ai/*`, `https://z.ai/*`, `https://www.z.ai/*`.
+- **Conversation URLs:** `/chat/<id>`, `/c/<id>`.
+- **Busy/stability:** English/Chinese search, thinking, analysis, generation, code/tool/multi-step panels, citations, Stop, and assistant/auxiliary changes.
+- **Errors:** English/Chinese login, frequency/usage limit, captcha/access, network, and provider failure.
+
+## Sakana Chat
+
+- **ID / status:** `sakana`, optional Phase 3 beta.
+- **Origin:** `https://chat.sakana.ai/*`.
+- **Conversation URL:** `/chat/<id>`.
+- **Busy/stability:** English/Japanese thinking, searching, analyzing, generating/answering, tool/source regions, Stop, and bounded response/auxiliary changes.
+- **Errors:** English/Japanese login, usage limit, authentication/captcha, network, and provider failure.
+
+## LongCat AI
+
+- **ID / status:** `longcat`, optional Phase 3 beta.
+- **Origins:** `https://longcat.ai/*`, `https://www.longcat.ai/*`, `https://longcat.chat/*`, `https://www.longcat.chat/*`.
+- **Conversation URL:** `/chat/<id>`.
+- **Busy/stability:** coding agent, code/tool calls, terminal execution, multi-step task progress, search/reasoning/generation, Stop, and assistant/tool/task changes.
+- **Errors:** login, usage/rate/quota, verification/access, tool/terminal failure, network, and provider failure.
+
+## Adding a later provider
+
+Create a provider-owned adapter/config, export conversation extraction for tests, add disabled metadata, extend the provider union/default maps only when implementation ships, add exact optional origins, add construction to `registry.ts`, and extend permission/URL/selector/diagnostics tests. Never add `<all_urls>`, transcript scanning, remote code, or provider phrases/selectors to the scheduler.
+
+Manually verify new chat migration, multiline boundary blanks, login/error behavior, two conversations, two tabs of one conversation, leader takeover, 50 SPA route changes, and a 20-30 minute Chrome Task Manager soak. Every adapter must disconnect its observer, clear timers/listeners, clear references, and allow its scheduler/leader to dispose.

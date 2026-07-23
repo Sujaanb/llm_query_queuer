@@ -1,152 +1,40 @@
-import { LEADER_HEARTBEAT_MS, LEADER_STALE_MS } from '../lib/constants';
-import { enabledProviderForUrl } from '../lib/providers';
-import { ensureStorageMigrated } from '../lib/storage';
-import type { LeaderLock, ProviderId, TabState } from '../lib/types';
+import { LEADER_HEARTBEAT_MS, LEADER_STALE_MS, OPTIONAL_PROVIDER_IDS } from '../lib/constants';
+import { migrationLockAvailable } from '../lib/migration';
+import { resolveProviderPermissionState } from '../lib/permissions';
+import { optionalProvider, providerForUrl, PROVIDERS, runtimeProvider } from '../lib/providers';
+import { ensureStorageMigrated, migrateQueue, readStorage, setProviderEnabled } from '../lib/storage';
+import type { LeaderLock, MigrationLock, OptionalProviderId, ProviderId, ProviderPermissionState, TabState } from '../lib/types';
 
-const PANEL_PATH = 'src/sidepanel/index.html';
-let sessionOperations: Promise<unknown> = Promise.resolve();
+const PANEL_PATH = 'src/sidepanel/index.html'; const SCRIPT_PREFIX = 'lmqq-provider-'; let sessionOperations: Promise<unknown> = Promise.resolve();
+function serializeSession<T>(operation: () => Promise<T>): Promise<T> { const result = sessionOperations.then(operation, operation); sessionOperations = result.then(() => undefined, () => undefined); return result; }
+function scriptId(id: OptionalProviderId): string { return `${SCRIPT_PREFIX}${id}`; }
+async function registerProvider(providerId: OptionalProviderId): Promise<void> { const provider = optionalProvider(providerId); if (!provider) return; const id = scriptId(providerId); const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] }); if (existing.length) return; try { await chrome.scripting.registerContentScripts([{ id, matches: [...provider.matches], js: ['assets/content.js'], runAt: 'document_idle', persistAcrossSessions: true }]); } catch (error) { if (!String(error).toLowerCase().includes('already')) throw error; } }
+async function unregisterProvider(providerId: OptionalProviderId): Promise<void> { try { await chrome.scripting.unregisterContentScripts({ ids: [scriptId(providerId)] }); } catch (error) { if (!String(error).toLowerCase().includes('not found')) console.warn('[LM Query Queuer] Could not unregister provider script', { providerId, error }); } }
+async function hasPermission(providerId: OptionalProviderId): Promise<boolean> { const provider = optionalProvider(providerId); return provider ? chrome.permissions.contains({ origins: [...provider.optionalOrigins] }) : false; }
+async function reconcileProviders(): Promise<void> { const storage = await readStorage(); for (const id of OPTIONAL_PROVIDER_IDS) { const granted = await hasPermission(id); if (storage.providerEnablement[id] && granted) await registerProvider(id); else { await unregisterProvider(id); if (storage.providerEnablement[id] && !granted) { await setProviderEnabled(id, false); console.warn('[LM Query Queuer] Optional provider disabled because permission is missing', { providerId: id }); } } } }
+async function providerStates(): Promise<ProviderPermissionState[]> { const storage = await readStorage(); return Promise.all(PROVIDERS.map(async (provider) => { if (provider.status === 'planned') return resolveProviderPermissionState(provider, false, false); return resolveProviderPermissionState(provider, provider.builtIn ? true : storage.providerEnablement[provider.id as OptionalProviderId], provider.builtIn ? true : await hasPermission(provider.id as OptionalProviderId)); })); }
+async function configurePanelForTab(tabId: number, url?: string): Promise<void> { const provider = providerForUrl(url); const enabled = Boolean(provider); try { await chrome.sidePanel.setOptions({ tabId, enabled, ...(enabled ? { path: PANEL_PATH } : {}) }); } catch (error) { console.warn('[LM Query Queuer] Could not configure side panel', { tabId, enabled, error }); } }
+async function configureOpenTabs(): Promise<void> { await chrome.sidePanel.setOptions({ enabled: false }); const tabs = await chrome.tabs.query({}); await Promise.all(tabs.filter((tab) => tab.id !== undefined).map((tab) => configurePanelForTab(tab.id!, tab.url))); }
+async function initialize(): Promise<void> { await ensureStorageMigrated(); await reconcileProviders(); await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }); await configureOpenTabs(); }
 
-function serializeSession<T>(operation: () => Promise<T>): Promise<T> {
-  const result = sessionOperations.then(operation, operation);
-  sessionOperations = result.then(() => undefined, () => undefined);
-  return result;
-}
+interface SessionMaps { tabStates: Record<string, TabState>; leaderLocks: Record<string, LeaderLock>; migrationLocks: Record<string, MigrationLock> }
+async function sessionMaps(): Promise<SessionMaps> { const value = await chrome.storage.session.get(['tabStates', 'leaderLocks', 'migrationLocks']); return { tabStates: (value.tabStates ?? {}) as Record<string, TabState>, leaderLocks: (value.leaderLocks ?? {}) as Record<string, LeaderLock>, migrationLocks: (value.migrationLocks ?? {}) as Record<string, MigrationLock> }; }
+async function updateTab(sender: chrome.runtime.MessageSender, message: Record<string, unknown>): Promise<{ tabId: number; temporaryConversationKey: string } | null> { const tabId = sender.tab?.id; const url = sender.tab?.url ?? ''; const metadata = providerForUrl(url); const provider = metadata ? runtimeProvider(metadata.id) : null; if (tabId === undefined || !provider) return null; const state = await sessionMaps(); const existing = state.tabStates[String(tabId)]; const temporaryConversationKey = existing?.temporaryConversationKey ?? `temp:${provider.id}:tab:${tabId}`; state.tabStates[String(tabId)] = { tabId, url, providerId: provider.id, conversationId: typeof message.conversationId === 'string' ? message.conversationId : existing?.conversationId ?? null, temporaryConversationKey, visible: Boolean(message.visible), focused: Boolean(message.focused), lastSeen: Date.now() }; await chrome.storage.session.set({ tabStates: state.tabStates }); return { tabId, temporaryConversationKey }; }
+async function leaderRequest(sender: chrome.runtime.MessageSender, message: Record<string, unknown>, renew: boolean): Promise<{ leader: boolean; lock?: LeaderLock }> { const tabId = sender.tab?.id; const scope = typeof message.scope === 'string' ? message.scope : ''; const instanceId = typeof message.instanceId === 'string' ? message.instanceId : ''; if (tabId === undefined || !scope || !instanceId) return { leader: false }; if (renew) await updateTab(sender, message); const state = await sessionMaps(); const now = Date.now(); const current = state.leaderLocks[scope]; const visible = Boolean(message.visible); const focused = Boolean(message.focused); const own = current?.tabId === tabId && current.instanceId === instanceId; const stale = !current || now - current.lastHeartbeat > LEADER_STALE_MS; const preferred = visible && focused && Boolean(current) && (!current.visible || !current.focused); if (own) { if (renew && now - current.lastHeartbeat >= LEADER_HEARTBEAT_MS - 250) { state.leaderLocks[scope] = { tabId, instanceId, lastHeartbeat: now, visible, focused }; await chrome.storage.session.set({ leaderLocks: state.leaderLocks }); } return { leader: true, lock: state.leaderLocks[scope] ?? current }; } if (stale || preferred) { const lock = { tabId, instanceId, lastHeartbeat: now, visible, focused }; state.leaderLocks[scope] = lock; await chrome.storage.session.set({ leaderLocks: state.leaderLocks }); return { leader: true, lock }; } return { leader: false, lock: current }; }
+async function releaseLeader(message: Record<string, unknown>): Promise<void> { const scope = typeof message.scope === 'string' ? message.scope : ''; const instanceId = typeof message.instanceId === 'string' ? message.instanceId : ''; if (!scope || !instanceId) return; const state = await sessionMaps(); if (state.leaderLocks[scope]?.instanceId === instanceId) { delete state.leaderLocks[scope]; await chrome.storage.session.set({ leaderLocks: state.leaderLocks }); } }
+async function cleanupTab(tabId: number): Promise<void> { const state = await sessionMaps(); delete state.tabStates[String(tabId)]; for (const [scope, lock] of Object.entries(state.leaderLocks)) if (lock.tabId === tabId) delete state.leaderLocks[scope]; await chrome.storage.session.set({ tabStates: state.tabStates, leaderLocks: state.leaderLocks }); }
+async function cleanupProvider(providerId: OptionalProviderId): Promise<void> { const state = await sessionMaps(); for (const [tabId, tab] of Object.entries(state.tabStates)) if (tab.providerId === providerId) delete state.tabStates[tabId]; for (const scope of Object.keys(state.leaderLocks)) if (scope.startsWith(`${providerId}:`)) delete state.leaderLocks[scope]; for (const scope of Object.keys(state.migrationLocks)) if (scope.startsWith(`${providerId}:`)) delete state.migrationLocks[scope]; await chrome.storage.session.set(state); }
+async function migrateWithLock(message: Record<string, unknown>): Promise<{ migrated: boolean; locked?: boolean }> { const providerId = message.providerId as ProviderId; const from = typeof message.from === 'string' ? message.from : ''; const to = typeof message.to === 'string' ? message.to : ''; const owner = typeof message.owner === 'string' ? message.owner : ''; if (!runtimeProvider(providerId) || !from.startsWith(`temp:${providerId}:`) || !to.startsWith('conversation:') || !owner) return { migrated: false }; const scope = `${providerId}:${from}->${to}`; const state = await sessionMaps(); if (!migrationLockAvailable(state.migrationLocks[scope], owner)) return { migrated: false, locked: true }; state.migrationLocks[scope] = { owner, acquiredAt: Date.now() }; await chrome.storage.session.set({ migrationLocks: state.migrationLocks }); try { await migrateQueue(providerId, from, to); return { migrated: true }; } finally { const latest = await sessionMaps(); if (latest.migrationLocks[scope]?.owner === owner) { delete latest.migrationLocks[scope]; await chrome.storage.session.set({ migrationLocks: latest.migrationLocks }); } } }
 
-async function configurePanelForTab(tabId: number, url?: string): Promise<void> {
-  const enabled = Boolean(enabledProviderForUrl(url));
-  try { await chrome.sidePanel.setOptions({ tabId, enabled, ...(enabled ? { path: PANEL_PATH } : {}) }); }
-  catch (error) { console.warn('[LM Query Queuer] Could not configure side panel', { tabId, enabled, error }); }
-}
+async function enableProvider(message: Record<string, unknown>): Promise<Record<string, unknown>> { const provider = optionalProvider(String(message.providerId)); if (!provider) return { ok: false, message: 'Provider is not available.' }; const granted = await chrome.permissions.contains({ origins: [...provider.optionalOrigins] }); if (!granted) return { ok: false, message: 'Permission is required before this provider can be enabled.' }; await setProviderEnabled(provider.id, true); await registerProvider(provider.id); let activated = false; const tabId = typeof message.tabId === 'number' ? message.tabId : undefined; if (tabId !== undefined) { try { const tab = await chrome.tabs.get(tabId); if (providerForUrl(tab.url)?.id === provider.id) { await chrome.scripting.executeScript({ target: { tabId }, files: ['assets/content.js'] }); activated = true; } } catch { activated = false; } } return { ok: true, activated, message: activated ? `${provider.name} enabled.` : 'Provider enabled. Reload the page to start queueing.' }; }
+async function disableProvider(message: Record<string, unknown>): Promise<Record<string, unknown>> { const provider = optionalProvider(String(message.providerId)); if (!provider) return { ok: false, message: 'Provider is not available.' }; await setProviderEnabled(provider.id, false); await unregisterProvider(provider.id); await cleanupProvider(provider.id); const tabs = await chrome.tabs.query({ url: [...provider.matches] }); await Promise.allSettled(tabs.filter((tab) => tab.id !== undefined).map((tab) => chrome.tabs.sendMessage(tab.id!, { type: 'DISPOSE_PROVIDER', providerId: provider.id }))); return { ok: true, message: `${provider.name} disabled. Saved queues were kept.` }; }
 
-async function configureOpenTabs(): Promise<void> {
-  await chrome.sidePanel.setOptions({ enabled: false });
-  const tabs = await chrome.tabs.query({});
-  await Promise.all(tabs.filter((tab) => tab.id !== undefined).map((tab) => configurePanelForTab(tab.id!, tab.url)));
-}
-
-async function initialize(): Promise<void> {
-  await ensureStorageMigrated();
-  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  await configureOpenTabs();
-}
-
-async function sessionMaps(): Promise<{ tabStates: Record<string, TabState>; leaderLocks: Record<string, LeaderLock> }> {
-  const value = await chrome.storage.session.get(['tabStates', 'leaderLocks']);
-  return { tabStates: (value.tabStates ?? {}) as Record<string, TabState>, leaderLocks: (value.leaderLocks ?? {}) as Record<string, LeaderLock> };
-}
-
-async function updateTab(sender: chrome.runtime.MessageSender, message: Record<string, unknown>): Promise<{ tabId: number; temporaryConversationKey: string } | null> {
-  const tabId = sender.tab?.id;
-  const url = sender.tab?.url ?? '';
-  const provider = enabledProviderForUrl(url);
-  if (tabId === undefined || !provider) return null;
-  const state = await sessionMaps();
-  const existing = state.tabStates[String(tabId)];
-  const temporaryConversationKey = existing?.temporaryConversationKey ?? `temp:tab:${tabId}`;
-  state.tabStates[String(tabId)] = {
-    tabId,
-    url,
-    providerId: provider.id,
-    conversationId: typeof message.conversationId === 'string' ? message.conversationId : existing?.conversationId ?? null,
-    temporaryConversationKey,
-    visible: Boolean(message.visible),
-    focused: Boolean(message.focused),
-    lastSeen: Date.now(),
-  };
-  await chrome.storage.session.set({ tabStates: state.tabStates });
-  return { tabId, temporaryConversationKey };
-}
-
-async function leaderRequest(sender: chrome.runtime.MessageSender, message: Record<string, unknown>, renew: boolean): Promise<{ leader: boolean; lock?: LeaderLock }> {
-  const tabId = sender.tab?.id;
-  const scope = typeof message.scope === 'string' ? message.scope : '';
-  const instanceId = typeof message.instanceId === 'string' ? message.instanceId : '';
-  if (tabId === undefined || !scope || !instanceId) return { leader: false };
-  if (renew) await updateTab(sender, message);
-  const state = await sessionMaps();
-  const now = Date.now();
-  const current = state.leaderLocks[scope];
-  const visible = Boolean(message.visible);
-  const focused = Boolean(message.focused);
-  const own = current?.tabId === tabId && current.instanceId === instanceId;
-  const stale = !current || now - current.lastHeartbeat > LEADER_STALE_MS;
-  const preferred = visible && focused && Boolean(current) && (!current.visible || !current.focused);
-  if (own) {
-    if (renew && now - current.lastHeartbeat >= LEADER_HEARTBEAT_MS - 250) {
-      state.leaderLocks[scope] = { tabId, instanceId, lastHeartbeat: now, visible, focused };
-      await chrome.storage.session.set({ leaderLocks: state.leaderLocks });
-    }
-    return { leader: true, lock: state.leaderLocks[scope] ?? current };
-  }
-  if (stale || preferred) {
-    const lock = { tabId, instanceId, lastHeartbeat: now, visible, focused };
-    state.leaderLocks[scope] = lock;
-    await chrome.storage.session.set({ leaderLocks: state.leaderLocks });
-    return { leader: true, lock };
-  }
-  return { leader: false, lock: current };
-}
-
-async function releaseLeader(message: Record<string, unknown>): Promise<void> {
-  const scope = typeof message.scope === 'string' ? message.scope : '';
-  const instanceId = typeof message.instanceId === 'string' ? message.instanceId : '';
-  if (!scope || !instanceId) return;
-  const state = await sessionMaps();
-  if (state.leaderLocks[scope]?.instanceId === instanceId) {
-    delete state.leaderLocks[scope];
-    await chrome.storage.session.set({ leaderLocks: state.leaderLocks });
-  }
-}
-
-async function cleanupTab(tabId: number): Promise<void> {
-  const state = await sessionMaps();
-  delete state.tabStates[String(tabId)];
-  for (const [scope, lock] of Object.entries(state.leaderLocks)) if (lock.tabId === tabId) delete state.leaderLocks[scope];
-  await chrome.storage.session.set({ tabStates: state.tabStates, leaderLocks: state.leaderLocks });
-}
-
-chrome.runtime.onInstalled.addListener(() => { void initialize(); });
-chrome.runtime.onStartup.addListener(() => { void initialize(); });
-chrome.tabs.onCreated.addListener((tab) => { if (tab.id !== undefined) void configurePanelForTab(tab.id, tab.url); });
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { if (changeInfo.url || changeInfo.status === 'loading') void configurePanelForTab(tabId, changeInfo.url ?? tab.url); });
-chrome.tabs.onActivated.addListener(({ tabId }) => { void chrome.tabs.get(tabId).then((tab) => configurePanelForTab(tabId, tab.url)); });
-chrome.tabs.onRemoved.addListener((tabId) => { void serializeSession(() => cleanupTab(tabId)); });
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-  void chrome.tabs.query({ active: true, windowId }).then(([tab]) => tab?.id !== undefined ? configurePanelForTab(tab.id, tab.url) : undefined);
-});
-
-async function openForActiveTab(): Promise<void> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id === undefined || !enabledProviderForUrl(tab.url)) return;
-  try {
-    await configurePanelForTab(tab.id, tab.url);
-    await chrome.sidePanel.open({ tabId: tab.id });
-  } catch (error) { console.error('[LM Query Queuer] Could not open the side panel. Chrome may have rejected the user gesture.', error); }
-}
-
+chrome.runtime.onInstalled.addListener(() => { void initialize(); }); chrome.runtime.onStartup.addListener(() => { void initialize(); }); chrome.permissions.onRemoved.addListener(() => { void reconcileProviders(); });
+chrome.tabs.onCreated.addListener((tab) => { if (tab.id !== undefined) void configurePanelForTab(tab.id, tab.url); }); chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => { if (changeInfo.url || changeInfo.status === 'loading') void configurePanelForTab(tabId, changeInfo.url ?? tab.url); }); chrome.tabs.onActivated.addListener(({ tabId }) => { void chrome.tabs.get(tabId).then((tab) => configurePanelForTab(tabId, tab.url)); }); chrome.tabs.onRemoved.addListener((tabId) => { void serializeSession(() => cleanupTab(tabId)); }); chrome.windows.onFocusChanged.addListener((windowId) => { if (windowId !== chrome.windows.WINDOW_ID_NONE) void chrome.tabs.query({ active: true, windowId }).then(([tab]) => tab?.id !== undefined ? configurePanelForTab(tab.id, tab.url) : undefined); });
+async function openForActiveTab(): Promise<void> { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (tab?.id === undefined || !providerForUrl(tab.url)) return; try { await configurePanelForTab(tab.id, tab.url); await chrome.sidePanel.open({ tabId: tab.id }); } catch (error) { console.error('[LM Query Queuer] Could not open side panel', error); } }
 chrome.commands.onCommand.addListener((command) => { if (command === 'open-queue-panel') void openForActiveTab(); });
-
-chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
-  const message = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
-  const type = message.type;
-  if (type === 'REGISTER_TAB' || type === 'TAB_CONTEXT') {
-    void serializeSession(() => updateTab(sender, message)).then(sendResponse);
-    return true;
-  }
-  if (type === 'LEADER_HEARTBEAT' || type === 'LEADER_CHECK') {
-    void serializeSession(() => leaderRequest(sender, message, type === 'LEADER_HEARTBEAT')).then(sendResponse);
-    return true;
-  }
-  if (type === 'LEADER_RELEASE') {
-    void serializeSession(() => releaseLeader(message)).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  if (type === 'TAB_UNLOAD' && sender.tab?.id !== undefined) {
-    void serializeSession(() => cleanupTab(sender.tab!.id!)).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-  return false;
+chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => { const message = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}; const type = message.type;
+  if (type === 'ENABLE_PROVIDER') { void enableProvider(message).then(sendResponse); return true; } if (type === 'DISABLE_PROVIDER') { void disableProvider(message).then(sendResponse); return true; } if (type === 'GET_PROVIDER_STATES') { void providerStates().then(sendResponse); return true; }
+  if (type === 'REGISTER_TAB' || type === 'TAB_CONTEXT') { void serializeSession(() => updateTab(sender, message)).then(sendResponse); return true; } if (type === 'LEADER_HEARTBEAT' || type === 'LEADER_CHECK') { void serializeSession(() => leaderRequest(sender, message, type === 'LEADER_HEARTBEAT')).then(sendResponse); return true; } if (type === 'LEADER_RELEASE') { void serializeSession(() => releaseLeader(message)).then(() => sendResponse({ ok: true })); return true; } if (type === 'MIGRATE_QUEUE') { void serializeSession(() => migrateWithLock(message)).then(sendResponse); return true; } if (type === 'TAB_UNLOAD' && sender.tab?.id !== undefined) { void serializeSession(() => cleanupTab(sender.tab!.id!)).then(() => sendResponse({ ok: true })); return true; } return false;
 });
-
 void initialize();

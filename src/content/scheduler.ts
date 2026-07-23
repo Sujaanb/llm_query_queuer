@@ -91,9 +91,9 @@ export class Scheduler {
       }
 
       const item = queue[0];
-      if (!this.provider.getComposer() || !this.provider.canSend()) {
+      if (!this.provider.getComposer()) {
         if (!this.unavailableSince) this.unavailableSince = Date.now();
-        if (Date.now() - this.unavailableSince >= storage.settings.fallbackReadyTimeoutMs) await this.fail(item.id, `${this.provider.name} composer or send control was not available.`);
+        if (Date.now() - this.unavailableSince >= storage.settings.fallbackReadyTimeoutMs) await this.fail(item.id, `${this.provider.name} composer was not available.`);
         return;
       }
       this.unavailableSince = 0;
