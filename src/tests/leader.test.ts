@@ -1,41 +1,25 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeaderElection } from '../content/leader';
 
-describe('leader election storage behavior', () => {
-  let values: Record<string, unknown>;
-  let writes: number;
-
+const debug = { add: vi.fn() } as never;
+describe('leader election messaging', () => {
+  const sendMessage = vi.fn();
   beforeEach(() => {
-    values = {};
-    writes = 0;
-    vi.stubGlobal('chrome', {
-      storage: {
-        local: {
-          get: vi.fn(async (key: string) => ({ [key]: values[key] })),
-          set: vi.fn(async (patch: Record<string, unknown>) => {
-            writes++;
-            Object.assign(values, patch);
-          }),
-        },
-      },
-    });
+    sendMessage.mockReset();
+    vi.stubGlobal('document', { hidden: false, hasFocus: () => true });
+    vi.stubGlobal('chrome', { runtime: { sendMessage } });
   });
-
-  it('does not write storage during scheduler leadership checks', async () => {
-    const leader = new LeaderElection(() => 'conversation:test');
-    expect(await leader.heartbeat()).toBe(true);
-    expect(writes).toBe(1);
-
+  it('checks leadership without local-storage writes', async () => {
+    sendMessage.mockResolvedValue({ leader: true, lock: { tabId: 1 } });
+    const leader = new LeaderElection('chatgpt', () => 'conversation:test', debug);
+    (leader as unknown as { stopped: boolean }).stopped = false;
     expect(await leader.isLeader()).toBe(true);
-    expect(await leader.isLeader()).toBe(true);
-    expect(writes).toBe(1);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'LEADER_CHECK', scope: 'chatgpt:conversation:test' }));
   });
-
-  it('does not overwrite a live leader from another tab', async () => {
-    values['leader:conversation:test'] = { token: 'another-tab', at: Date.now() };
-    const leader = new LeaderElection(() => 'conversation:test');
-
+  it('honors a non-leader response', async () => {
+    sendMessage.mockResolvedValue({ leader: false, lock: { tabId: 2 } });
+    const leader = new LeaderElection('chatgpt', () => 'conversation:test', debug);
+    (leader as unknown as { stopped: boolean }).stopped = false;
     expect(await leader.isLeader()).toBe(false);
-    expect(writes).toBe(0);
   });
 });

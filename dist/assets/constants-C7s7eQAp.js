@@ -1,1 +1,0 @@
-const s={sendDelayMs:3e3,stabilityMs:2e3,fallbackReadyTimeoutMs:15e3,alwaysQueue:!1,showToasts:!0,pauseOnStop:!0,pauseOnError:!0},t={settings:s},a=/^https:\/\/(chatgpt\.com|chat\.openai\.com)\//i;export{a as C,t as D,s as a};

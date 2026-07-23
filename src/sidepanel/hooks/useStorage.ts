@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { readStorage } from '../../lib/storage';
 import type { StorageState } from '../../lib/types';
 
@@ -8,8 +8,7 @@ export function useStorageState() {
   useEffect(() => {
     refresh();
     const listener = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
-      if (areaName !== 'local') return;
-      if (changes.schemaVersion || changes.settings || changes.queuesByConversation || changes.pausedByConversation) refresh();
+      if (areaName === 'local' && (changes.schemaVersion || changes.settings || changes.queuesByProvider || changes.pausedByProvider)) refresh();
     };
     chrome.storage.onChanged.addListener(listener);
     return () => chrome.storage.onChanged.removeListener(listener);

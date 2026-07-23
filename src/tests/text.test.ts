@@ -1,28 +1,11 @@
-﻿import { describe, expect, it } from 'vitest';
-import { normalizePromptText, promptTextMatches } from '../lib/text';
+import { describe, expect, it } from 'vitest';
+import { hasPromptContent, normalizePromptText, promptTextMatches } from '../lib/text';
 
- describe('prompt text normalization', () => {
-  it('normalizes Windows and legacy carriage-return line endings', () => {
-    expect(normalizePromptText('one\r\ntwo\rthree')).toBe('one\ntwo\nthree');
-  });
-
-  it('normalizes Unicode line and paragraph separators', () => {
-    expect(normalizePromptText('one\u2028two\u2029three')).toBe('one\ntwo\nthree');
-  });
-
-  it('matches CRLF input with LF composer output', () => {
-    expect(promptTextMatches('first\nsecond', 'first\r\nsecond')).toBe(true);
-  });
-
-  it('matches contenteditable paragraph-boundary normalization', () => {
-    expect(promptTextMatches('first\n\nsecond', 'first\nsecond')).toBe(true);
-  });
-
-  it('matches non-breaking spaces and ignores editor marker characters', () => {
-    expect(promptTextMatches('first\u00a0line\u200b', 'first line')).toBe(true);
-  });
-
-  it('does not match different prompt content', () => {
-    expect(promptTextMatches('first line', 'different line')).toBe(false);
-  });
+describe('multiline utilities', () => {
+  it('normalizes CRLF, CR, and Unicode separators to LF', () => expect(normalizePromptText('one\r\ntwo\rthree\u2028four\u2029five')).toBe('one\ntwo\nthree\nfour\nfive'));
+  it('preserves intentional newlines and boundary blank lines', () => expect(normalizePromptText('\r\nfirst\r\n\r\nsecond\r\n')).toBe('\nfirst\n\nsecond\n'));
+  it('detects whitespace-only and non-empty prompts', () => { expect(hasPromptContent(' \n\t')).toBe(false); expect(hasPromptContent('\n code\n')).toBe(true); });
+  it('accepts equivalent CRLF/LF composer text', () => expect(promptTextMatches('first\nsecond', 'first\r\nsecond')).toBe(true));
+  it('normalizes only known editor artifacts', () => expect(promptTextMatches('first\u00a0line\u200b', 'first line')).toBe(true));
+  it('does not collapse paragraph, indentation, or boundary whitespace', () => { expect(promptTextMatches('first\n\nsecond', 'first\nsecond')).toBe(false); expect(promptTextMatches(' code', 'code')).toBe(false); expect(promptTextMatches('\ncode', 'code')).toBe(false); });
 });

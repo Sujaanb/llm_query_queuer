@@ -1,14 +1,15 @@
-﻿import { createId } from './id';
-import { normalizePromptText } from './text';
-import type { QueueItem, QueueItemSource } from './types';
+import { createId } from './id';
+import { hasPromptContent, normalizePromptText } from './text';
+import type { QueueItem, QueueItemSource, QueueItemStatus } from './types';
 
 export function makeItem(text: string, source: QueueItemSource = 'manual'): QueueItem {
   const now = Date.now();
-  return { id: createId(), text: normalizePromptText(text).trim(), source, status: 'queued', createdAt: now, updatedAt: now };
+  return { id: createId(), text: normalizePromptText(text), source, status: 'queued', createdAt: now, updatedAt: now };
 }
 
-export const appendPrompts = (items: QueueItem[], prompts: string[], source: QueueItemSource = 'import') =>
-  [...items, ...prompts.map((text) => makeItem(text, source))];
+export function appendPrompts(items: QueueItem[], prompts: string[], source: QueueItemSource = 'import'): QueueItem[] {
+  return [...items, ...prompts.filter(hasPromptContent).map((text) => makeItem(text, source))];
+}
 
 export function duplicateItem(items: QueueItem[], id: string): QueueItem[] {
   const index = items.findIndex((item) => item.id === id);
@@ -17,7 +18,8 @@ export function duplicateItem(items: QueueItem[], id: string): QueueItem[] {
   return [...items.slice(0, index + 1), copy, ...items.slice(index + 1)];
 }
 
-export const deleteItem = (items: QueueItem[], id: string) => items.filter((item) => item.id !== id);
+export const deleteItem = (items: QueueItem[], id: string): QueueItem[] => items.filter((item) => item.id !== id);
+export const clearItems = (): QueueItem[] => [];
 
 export function reorderItem(items: QueueItem[], activeId: string, overId: string): QueueItem[] {
   const from = items.findIndex((item) => item.id === activeId);
@@ -30,7 +32,11 @@ export function reorderItem(items: QueueItem[], activeId: string, overId: string
 }
 
 export function editItem(items: QueueItem[], id: string, text: string): QueueItem[] {
-  const value = text.trim();
-  if (!value) return items;
-  return items.map((item) => item.id === id ? { ...item, text: value, source: 'edit', updatedAt: Date.now() } : item);
+  if (!hasPromptContent(text)) return items;
+  const normalized = normalizePromptText(text);
+  return items.map((item) => item.id === id ? { ...item, text: normalized, source: 'edit', status: 'queued', updatedAt: Date.now() } : item);
+}
+
+export function setItemStatus(items: QueueItem[], id: string, status: QueueItemStatus): QueueItem[] {
+  return items.map((item) => item.id === id ? { ...item, status, updatedAt: Date.now() } : item);
 }

@@ -1,100 +1,143 @@
-﻿import { updateQueue, readStorage, setPaused } from '../lib/storage';
-import type { Settings } from '../lib/types';
-import { composerEnabled, findComposer } from './chatgpt-dom';
-import { clearComposer, submitComposer, writeComposer } from './composer';
+import { readStorage, setPaused, updateQueue } from '../lib/storage';
+import { setItemStatus } from '../lib/queue';
+import type { ProviderId, SchedulerState, Settings } from '../lib/types';
+import type { DebugLog } from './debug';
 import type { LeaderElection } from './leader';
-import type { StateDetector } from './state-detector';
+import type { ProviderAdapter } from './providers/types';
 import type { Toasts } from './toasts';
-
-export type SchedulerState = 'idle' | 'waitingAfterSend' | 'busy' | 'ready' | 'sending' | 'paused' | 'error';
 
 export class Scheduler {
   state: SchedulerState = 'idle';
   private running = false;
+  private disposed = false;
   private sawBusy = false;
   private readySince = 0;
-  private timer?: number;
+  private timer: number | null = null;
+  private autoSubmitTimer: number | null = null;
   private autoSubmitting = false;
+  private removeProviderObserver: (() => void) | null = null;
+  private unavailableSince = 0;
+  private readonly storageListener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area === 'local' && (changes.queuesByProvider || changes.pausedByProvider || changes.settings)) void this.tick();
+  };
+  private readonly visibilityListener = () => { void this.tick(); };
 
   constructor(
+    private providerId: ProviderId,
     private key: () => string,
     private settings: () => Settings,
-    private detector: StateDetector,
+    private provider: ProviderAdapter,
     private leader: LeaderElection,
     private toasts: Toasts,
+    private debug: DebugLog,
   ) {}
 
-  start() {
-    this.detector.onChange((state, previous) => {
-      if (this.state === 'waitingAfterSend' && !['idle', 'ready', 'unknown'].includes(state)) this.sawBusy = true;
-      if ((state === 'ready' || state === 'idle') && this.sawBusy) this.readySince = Date.now();
-      if (state === 'error') void this.pauseForError();
-      if (previous !== state) void this.tick();
+  start(): void {
+    this.removeProviderObserver = this.provider.observe(() => {
+      if (this.state === 'waitingAfterSend' && this.provider.isBusy()) this.sawBusy = true;
+      if (this.sawBusy && this.provider.isReadyForNextMessage() && !this.readySince) this.readySince = Date.now();
+      if (this.provider.hasError()) void this.pauseForError();
+      void this.tick();
     });
     this.timer = window.setInterval(() => void this.tick(), 1000);
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== 'local') return;
-      if (changes.queuesByConversation || changes.pausedByConversation || changes.settings) void this.tick();
-    });
-    document.addEventListener('visibilitychange', () => void this.tick());
+    chrome.storage.onChanged.addListener(this.storageListener);
+    document.addEventListener('visibilitychange', this.visibilityListener);
     void this.tick();
   }
 
-  isAutoSubmitting() { return this.autoSubmitting; }
+  private transition(state: SchedulerState): void {
+    if (state === this.state) return;
+    this.debug.add('scheduler-transition', { from: this.state, to: state, provider: this.providerId, conversationKey: this.key() });
+    this.state = state;
+  }
 
-  async pause(message?: string) {
-    await setPaused(this.key(), true);
-    this.state = 'paused';
+  isAutoSubmitting(): boolean { return this.autoSubmitting; }
+
+  async pause(message?: string): Promise<void> {
+    await setPaused(this.providerId, this.key(), true);
+    this.transition('paused');
     if (message) this.toasts.show(message, 'warning');
   }
 
-  async pauseForError() {
-    if (this.settings().pauseOnError) await this.pause('Queue paused because ChatGPT reported an error');
+  private async pauseForError(): Promise<void> {
+    if (this.settings().pauseOnError) await this.pause(`${this.provider.name} reported an error. Queue paused.`);
   }
 
-  private async fail(id: string, uiMissing = false) {
-    await updateQueue(this.key(), (items) => items.map((item) => item.id === id ? { ...item, status: 'failed', updatedAt: Date.now() } : item));
-    await setPaused(this.key(), true);
-    this.state = 'error';
-    if (uiMissing) {
-      console.error('[ChatGPT Queue] Required composer or send control was not found', { url: location.href, detectorState: this.detector.current });
-      this.toasts.show('ChatGPT UI changed or required elements were not found. Queue paused.', 'error');
-    } else this.toasts.show('Failed to send queued message. Queue paused.', 'error');
+  private async fail(id: string, message: string): Promise<void> {
+    await updateQueue(this.providerId, this.key(), (items) => setItemStatus(items, id, 'failed'));
+    await setPaused(this.providerId, this.key(), true);
+    this.transition('error');
+    this.debug.add('send-failure', { itemId: id, reason: message });
+    this.toasts.show(`${message} Queue paused.`, 'error');
   }
 
-  async tick() {
-    if (this.running || document.hidden) return;
+  async tick(): Promise<void> {
+    if (this.running || this.disposed || document.hidden) return;
     this.running = true;
     try {
       const key = this.key();
       const storage = await readStorage();
-      const queue = storage.queuesByConversation[key] ?? [];
-      if (storage.pausedByConversation[key]) { this.state = 'paused'; return; }
-      if (!queue.length) { this.state = 'idle'; this.sawBusy = false; return; }
+      const queue = storage.queuesByProvider[this.providerId]?.[key] ?? [];
+      if (storage.pausedByProvider[this.providerId]?.[key]) { this.transition('paused'); return; }
+      if (!queue.length) { this.transition('idle'); this.sawBusy = false; this.readySince = 0; return; }
       if (!(await this.leader.isLeader())) return;
-      if (!findComposer()) { await this.fail(queue[0].id, true); return; }
-      const chat = this.detector.current;
-      if (!['idle', 'ready'].includes(chat)) { this.state = 'busy'; return; }
+      if (this.provider.hasError()) { await this.pauseForError(); return; }
+      if (this.provider.isBusy() || !this.provider.isReadyForNextMessage()) { this.transition('busy'); return; }
 
       if (this.state === 'waitingAfterSend' || this.sawBusy) {
         if (!this.sawBusy) return;
         if (!this.readySince) this.readySince = Date.now();
-        if (Date.now() - this.readySince < storage.settings.sendDelayMs) { this.state = 'ready'; return; }
+        if (Date.now() - this.readySince < storage.settings.sendDelayMs) { this.transition('ready'); return; }
       }
 
       const item = queue[0];
-      if (!findComposer() || !composerEnabled()) { await this.fail(item.id, true); return; }
-      this.state = 'sending';
-      await updateQueue(key, (items) => items.map((entry) => entry.id === item.id ? { ...entry, status: 'sending', updatedAt: Date.now() } : entry));
-      if (!(await writeComposer(item.text))) { clearComposer(); await this.fail(item.id, true); return; }
+      if (!this.provider.getComposer() || !this.provider.canSend()) {
+        if (!this.unavailableSince) this.unavailableSince = Date.now();
+        if (Date.now() - this.unavailableSince >= storage.settings.fallbackReadyTimeoutMs) await this.fail(item.id, `${this.provider.name} composer or send control was not available.`);
+        return;
+      }
+      this.unavailableSince = 0;
+      this.transition('sending');
+      await updateQueue(this.providerId, key, (items) => setItemStatus(items, item.id, 'sending'));
+      this.debug.add('send-attempt', { itemId: item.id, length: item.text.length, lines: item.text.split('\n').length });
+      const insertion = await this.provider.setComposerText(item.text);
+      if (!insertion.ok || !this.provider.verifyComposerText(item.text)) {
+        await this.provider.clearComposer();
+        await this.fail(item.id, 'Could not safely insert and verify the queued prompt.');
+        return;
+      }
+      if (!(await this.leader.isLeader()) || this.disposed) {
+        await this.provider.clearComposer();
+        await updateQueue(this.providerId, key, (items) => setItemStatus(items, item.id, 'queued'));
+        return;
+      }
       this.autoSubmitting = true;
-      const sent = await submitComposer();
-      setTimeout(() => { this.autoSubmitting = false; }, 500);
-      if (!sent) { this.autoSubmitting = false; clearComposer(); await this.fail(item.id); return; }
-      await updateQueue(key, (items) => items.filter((entry) => entry.id !== item.id));
-      this.state = 'waitingAfterSend';
+      const accepted = await this.provider.clickSend();
+      if (this.autoSubmitTimer !== null) clearTimeout(this.autoSubmitTimer);
+      this.autoSubmitTimer = window.setTimeout(() => { this.autoSubmitting = false; this.autoSubmitTimer = null; }, 500);
+      if (!accepted) {
+        this.autoSubmitting = false;
+        await this.provider.clearComposer();
+        await this.fail(item.id, 'The queued prompt was not accepted.');
+        return;
+      }
+      await updateQueue(this.providerId, key, (items) => items.filter((entry) => entry.id !== item.id));
+      this.debug.add('send-success', { itemId: item.id, insertionStrategy: insertion.strategy });
+      this.transition('waitingAfterSend');
       this.sawBusy = false;
       this.readySince = 0;
     } finally { this.running = false; }
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.removeProviderObserver?.();
+    this.removeProviderObserver = null;
+    if (this.timer !== null) clearInterval(this.timer);
+    if (this.autoSubmitTimer !== null) clearTimeout(this.autoSubmitTimer);
+    this.timer = null;
+    this.autoSubmitTimer = null;
+    chrome.storage.onChanged.removeListener(this.storageListener);
+    document.removeEventListener('visibilitychange', this.visibilityListener);
   }
 }
